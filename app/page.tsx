@@ -5,7 +5,8 @@ import {
   providerDashboard,
   resolveTenant,
 } from "@/lib/data/control-plane";
-import { customerWorkspaceData } from "@/lib/data/customer";
+import { customerPatchReview, customerWorkspaceData } from "@/lib/data/customer";
+import { MODEL_CONSENT_DISCLOSURE } from "@/lib/domain";
 import { listSpecsForReview } from "@/lib/data/specs";
 import { listProviderInvitations } from "@/lib/data/invitations";
 import { integrationReadiness } from "@/lib/platform/config";
@@ -108,6 +109,38 @@ function flashFromQuery(query: Record<string, SearchValue>) {
         "The invitation and lifecycle-sharing consent were recorded for this customer organization.",
     };
   }
+  if (first(query.requested) === "patch") {
+    return {
+      tone: "success" as const,
+      message:
+        "The patch workflow was queued against the recorded base commit. Nothing is written to your repository until you approve the exact patch hash.",
+    };
+  }
+  if (first(query.approved) === "patch") {
+    return {
+      tone: first(query.warned) ? ("warning" as const) : ("success" as const),
+      message: first(query.warned)
+        ? "The exact patch hash was approved even though validation did not fully pass. The draft pull request will carry a prominent warning."
+        : "The exact patch hash was approved and recorded with your membership in the audit chain.",
+    };
+  }
+  if (first(query.published) === "draft-pr") {
+    return {
+      tone: "success" as const,
+      message:
+        "A draft pull request was opened on a new branch. It is never merged automatically and the default branch was not written to.",
+    };
+  }
+  const consent = first(query.consent);
+  if (consent === "grant" || consent === "revoke") {
+    return {
+      tone: "success" as const,
+      message:
+        consent === "grant"
+          ? "External model processing consent was recorded with the disclosure version and your membership."
+          : "External model processing consent was revoked. Snippet egress stops immediately, including for runs already in flight.",
+    };
+  }
   if (first(query.requested) === "assessment") {
     return {
       tone: "success" as const,
@@ -165,6 +198,16 @@ export default async function Home({ searchParams }: HomeProps) {
           first(query.migration),
         )
       : undefined;
+  const selectedMigrationId =
+    first(query.migration) ?? customerData?.selectedMigration?.id;
+  const patchReview =
+    surface === "customer" && selectedMigrationId
+      ? await customerPatchReview(
+          context.workspace.organizationId,
+          selectedMigrationId,
+          first(query.file),
+        )
+      : null;
 
   return (
     <>
@@ -179,6 +222,8 @@ export default async function Home({ searchParams }: HomeProps) {
           actor={actor}
           providerData={providerData}
           customerData={customerData}
+          patchReview={patchReview}
+          consentDisclosure={MODEL_CONSENT_DISCLOSURE}
           integrations={integrations}
           flash={flashFromQuery(query)}
         />

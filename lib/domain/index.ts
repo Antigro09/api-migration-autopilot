@@ -1,4 +1,5 @@
 export * from "./audit";
+export * from "./consent-policy";
 export * from "./errors";
 export * from "./migration-spec";
 export * from "./run-manifest";

@@ -20,6 +20,7 @@ type GitHubWebhook = {
   pull_request?: {
     number?: unknown;
     merged?: unknown;
+    merge_commit_sha?: unknown;
     head?: { ref?: unknown };
   };
 };
@@ -102,6 +103,10 @@ export async function handleGitHubWebhook(
         headBranch: payload.pull_request.head.ref,
         action: action ?? "",
         merged: payload.pull_request.merged === true,
+        ...(typeof payload.pull_request.merge_commit_sha === "string"
+          ? { mergeCommitSha: payload.pull_request.merge_commit_sha }
+          : {}),
+        requestUrl: request.url,
       });
     }
 

@@ -112,6 +112,39 @@ function safeHashEquals(left: string, right: string): boolean {
   return timingSafeEqual(Buffer.from(left.toLowerCase(), "hex"), Buffer.from(right.toLowerCase(), "hex"));
 }
 
+interface PatchCheckInput {
+  readonly baseSha: string;
+  readonly expectedBaseSha: string;
+  readonly files: readonly FileEdit[];
+  readonly allowedPaths: readonly string[];
+  /** Omitted at the control-plane boundary, which has no repository checkout. */
+  readonly currentFiles?: ReadonlyMap<string, string>;
+  readonly expectedPatchSha256?: string;
+  readonly syntaxValidator?: SyntaxValidator;
+  /** When false, code paths are not required to carry sandbox syntax proof. */
+  readonly requireSyntaxProof?: boolean;
+  readonly maxPatchBytes?: number;
+  readonly maxFiles?: number;
+}
+
+/**
+ * Structural checks the control plane can perform without a checkout: path
+ * safety, allowed paths, workflow exclusion, binary content, duplicate and
+ * empty edits, size limits, and the canonical patch hash. These never trust a
+ * worker-reported verdict.
+ */
+export async function validatePatchEnvelope(input: {
+  readonly baseSha: string;
+  readonly expectedBaseSha: string;
+  readonly files: readonly FileEdit[];
+  readonly allowedPaths: readonly string[];
+  readonly expectedPatchSha256?: string;
+  readonly maxPatchBytes?: number;
+  readonly maxFiles?: number;
+}): Promise<PatchValidationResult> {
+  return runPatchChecks({ ...input, requireSyntaxProof: false });
+}
+
 export async function validateProposedPatch(input: {
   readonly baseSha: string;
   readonly expectedBaseSha: string;
@@ -123,6 +156,12 @@ export async function validateProposedPatch(input: {
   readonly maxPatchBytes?: number;
   readonly maxFiles?: number;
 }): Promise<PatchValidationResult> {
+  return runPatchChecks({ ...input, requireSyntaxProof: true });
+}
+
+async function runPatchChecks(
+  input: PatchCheckInput,
+): Promise<PatchValidationResult> {
   const issues: PatchValidationIssue[] = [];
   const allowed = new Set<string>();
   for (const path of input.allowedPaths) {
@@ -184,24 +223,28 @@ export async function validateProposedPatch(input: {
       issues.push({ code: "unchanged-file", path, message: "The proposed file has no content change." });
     }
 
-    const current = input.currentFiles.get(path);
-    if (current === undefined || !safeHashEquals(digest(current), digest(file.originalContent))) {
-      issues.push({
-        code: "source-integrity-mismatch",
-        path,
-        message: "The current file does not match the source content used to generate this patch.",
-      });
+    if (input.currentFiles) {
+      const current = input.currentFiles.get(path);
+      if (current === undefined || !safeHashEquals(digest(current), digest(file.originalContent))) {
+        issues.push({
+          code: "source-integrity-mismatch",
+          path,
+          message: "The current file does not match the source content used to generate this patch.",
+        });
+      }
     }
 
     totalBytes += UTF8_ENCODER.encode(file.originalContent).byteLength;
     totalBytes += UTF8_ENCODER.encode(file.newContent).byteLength;
     if (isCodePath(path)) {
       if (!input.syntaxValidator) {
-        issues.push({
-          code: "syntax-validator-required",
-          path,
-          message: "A sandbox-backed syntax validator is required before this code patch can be published.",
-        });
+        if (input.requireSyntaxProof) {
+          issues.push({
+            code: "syntax-validator-required",
+            path,
+            message: "A sandbox-backed syntax validator is required before this code patch can be published.",
+          });
+        }
       } else {
         const syntax = await input.syntaxValidator.validate(path, file.newContent);
         if (!syntax.valid) {

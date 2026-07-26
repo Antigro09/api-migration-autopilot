@@ -6,95 +6,15 @@ import type {
   MigrationFinding,
   SourceCitation,
 } from "./contracts";
-import { normalizeRepositoryPath } from "./patch-security";
-
-type UnknownRecord = Record<string, unknown>;
-
-function record(value: unknown, label: string): UnknownRecord {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new DomainError("VALIDATION_FAILED", `${label} must be an object.`);
-  }
-  return value as UnknownRecord;
-}
-
-function text(
-  value: unknown,
-  label: string,
-  maxLength: number,
-  optional = false,
-): string | undefined {
-  if (optional && value === undefined) return undefined;
-  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) {
-    throw new DomainError(
-      "VALIDATION_FAILED",
-      `${label} must be a non-empty string of at most ${maxLength} characters.`,
-    );
-  }
-  return value;
-}
-
-function boolean(value: unknown, label: string): boolean {
-  if (typeof value !== "boolean") {
-    throw new DomainError("VALIDATION_FAILED", `${label} must be a boolean.`);
-  }
-  return value;
-}
-
-function integer(
-  value: unknown,
-  label: string,
-  minimum: number,
-  maximum: number,
-): number {
-  if (
-    typeof value !== "number" ||
-    !Number.isInteger(value) ||
-    value < minimum ||
-    value > maximum
-  ) {
-    throw new DomainError(
-      "VALIDATION_FAILED",
-      `${label} must be an integer between ${minimum} and ${maximum}.`,
-    );
-  }
-  return value;
-}
-
-function list(value: unknown, label: string, maximum: number): unknown[] {
-  if (!Array.isArray(value) || value.length > maximum) {
-    throw new DomainError(
-      "VALIDATION_FAILED",
-      `${label} must be an array with at most ${maximum} entries.`,
-    );
-  }
-  return value;
-}
-
-function oneOf<T extends string>(
-  value: unknown,
-  label: string,
-  values: readonly T[],
-): T {
-  if (typeof value !== "string" || !values.includes(value as T)) {
-    throw new DomainError(
-      "VALIDATION_FAILED",
-      `${label} contains an unsupported value.`,
-    );
-  }
-  return value as T;
-}
-
-function repositoryPath(value: unknown, label: string): string {
-  const valueText = text(value, label, 1_024) as string;
-  try {
-    return normalizeRepositoryPath(valueText);
-  } catch {
-    throw new DomainError(
-      "VALIDATION_FAILED",
-      `${label} must be a normalized relative repository path.`,
-    );
-  }
-}
+import {
+  boolean,
+  integer,
+  list,
+  oneOf,
+  record,
+  repositoryPath,
+  text,
+} from "./parsing";
 
 function citation(value: unknown, index: number): SourceCitation {
   const input = record(value, `findings[].evidence[${index}]`);
@@ -117,7 +37,10 @@ function citation(value: unknown, index: number): SourceCitation {
   };
 }
 
-function finding(value: unknown, index: number): MigrationFinding {
+export function parseMigrationFinding(
+  value: unknown,
+  index: number,
+): MigrationFinding {
   const input = record(value, `findings[${index}]`);
   const location = record(input.location, `findings[${index}].location`);
   const evidence = list(input.evidence, "finding.evidence", 20).map(citation);
@@ -253,7 +176,9 @@ export function parseMigrationAssessment(value: unknown): MigrationAssessment {
         (warning) => text(warning, "dependency.warning", 1_000) as string,
       ),
     },
-    findings: list(input.findings, "assessment.findings", 10_000).map(finding),
+    findings: list(input.findings, "assessment.findings", 10_000).map(
+      parseMigrationFinding,
+    ),
     scannedFiles: list(
       input.scannedFiles,
       "assessment.scannedFiles",

@@ -1,7 +1,23 @@
 import { CommandExitError, Sandbox } from "e2b";
+import { normalizeRepositoryPath } from "@/lib/migration/patch-security";
 import { requireSecret } from "@/lib/platform/config";
 
-export type SandboxPhase = "analysis" | "dependency-preparation" | "validation";
+export type SandboxPhase =
+  | "analysis"
+  | "dependency-preparation"
+  | "validation"
+  /**
+   * One sandbox that installs dependencies from the registry and then runs the
+   * declared validation scripts. Egress stays restricted to the configured
+   * registry CIDRs for the whole run, so manifests record `registry_only`
+   * rather than a fully offline validation.
+   */
+  | "prepare-and-validate";
+
+export type SandboxOverlayFile = {
+  path: string;
+  content: string;
+};
 
 export type SandboxCommand = {
   category: "install" | "lint" | "typecheck" | "build" | "test";
@@ -34,6 +50,8 @@ export interface SandboxRunner {
     archiveFormat: "zip" | "tar.gz";
     commands: readonly SandboxCommand[];
     runId: string;
+    /** Generated files written over the extracted tree before any command. */
+    overlayFiles?: readonly SandboxOverlayFile[];
   }): Promise<SandboxRunResult>;
 }
 
@@ -61,7 +79,7 @@ function validateCommand(command: SandboxCommand, phase: SandboxPhase): void {
   }
   if (command.category === "install") {
     if (
-      phase !== "dependency-preparation" ||
+      !["dependency-preparation", "prepare-and-validate"].includes(phase) ||
       !INSTALL_COMMANDS.has(command.command)
     ) {
       throw new Error(
@@ -70,8 +88,31 @@ function validateCommand(command: SandboxCommand, phase: SandboxPhase): void {
     }
     return;
   }
-  if (phase !== "validation" || !SCRIPT_COMMAND.test(command.command)) {
+  if (
+    !["validation", "prepare-and-validate"].includes(phase) ||
+    !SCRIPT_COMMAND.test(command.command)
+  ) {
     throw new Error("Only approved package validation scripts can run offline.");
+  }
+}
+
+const MAX_OVERLAY_FILES = 100;
+const MAX_OVERLAY_BYTES = 2 * 1024 * 1024;
+
+function validateOverlay(files: readonly SandboxOverlayFile[]): void {
+  if (files.length > MAX_OVERLAY_FILES) {
+    throw new Error("Too many generated files were supplied to the sandbox.");
+  }
+  let total = 0;
+  for (const file of files) {
+    const path = normalizeRepositoryPath(file.path);
+    if (path.startsWith(".github/workflows")) {
+      throw new Error("Workflow files cannot be written into a sandbox.");
+    }
+    total += new TextEncoder().encode(file.content).byteLength;
+  }
+  if (total > MAX_OVERLAY_BYTES) {
+    throw new Error("Generated sandbox files exceed the 2 MiB limit.");
   }
 }
 
@@ -108,6 +149,7 @@ export class E2BSandboxRunner implements SandboxRunner {
     archiveFormat: "zip" | "tar.gz";
     commands: readonly SandboxCommand[];
     runId: string;
+    overlayFiles?: readonly SandboxOverlayFile[];
   }): Promise<SandboxRunResult> {
     if (input.archive.byteLength === 0 || input.archive.byteLength > MAX_ARCHIVE_BYTES) {
       throw new Error("Sandbox archive must be between 1 byte and 100 MiB.");
@@ -119,8 +161,13 @@ export class E2BSandboxRunner implements SandboxRunner {
       validateCommand(command, input.phase);
     }
 
+    if (input.overlayFiles) validateOverlay(input.overlayFiles);
+
+    const needsRegistry =
+      input.phase === "dependency-preparation" ||
+      input.phase === "prepare-and-validate";
     const cidrs = registryCidrs();
-    if (input.phase === "dependency-preparation" && cidrs.length === 0) {
+    if (needsRegistry && cidrs.length === 0) {
       return {
         sandboxId: "not-created",
         phase: input.phase,
@@ -143,11 +190,10 @@ export class E2BSandboxRunner implements SandboxRunner {
       apiKey: requireSecret("E2B_API_KEY"),
       timeoutMs: MAX_RUNTIME_MS,
       secure: true,
-      allowInternetAccess: input.phase === "dependency-preparation",
-      network:
-        input.phase === "dependency-preparation"
-          ? { allowOut: cidrs, allowPublicTraffic: false }
-          : { denyOut: ["0.0.0.0/0", "::/0"], allowPublicTraffic: false },
+      allowInternetAccess: needsRegistry,
+      network: needsRegistry
+        ? { allowOut: cidrs, allowPublicTraffic: false }
+        : { denyOut: ["0.0.0.0/0", "::/0"], allowPublicTraffic: false },
       lifecycle: { onTimeout: "kill" },
       metadata: {
         product: "api-migration-autopilot",
@@ -180,6 +226,13 @@ export class E2BSandboxRunner implements SandboxRunner {
       );
       const workingDirectory =
         rootResult.stdout.trim() || "/home/user/repository";
+
+      for (const file of input.overlayFiles ?? []) {
+        await sandbox.files.write(
+          `${workingDirectory}/${normalizeRepositoryPath(file.path)}`,
+          file.content,
+        );
+      }
 
       for (let index = 0; index < input.commands.length; index += 1) {
         const command = input.commands[index] as SandboxCommand;

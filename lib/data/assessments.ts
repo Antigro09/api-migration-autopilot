@@ -364,6 +364,7 @@ export async function completeAssessment(input: {
         mr.campaign_id AS campaignId,
         mr.migration_spec_id AS specId,
         mr.migration_spec_revision AS specRevision,
+        mr.kind,
         rm.campaign_participant_id AS participantId
        FROM migration_runs mr
        JOIN repository_migrations rm ON rm.id = mr.repository_migration_id
@@ -377,6 +378,7 @@ export async function completeAssessment(input: {
       campaignId: string;
       specId: string;
       specRevision: number;
+      kind: string;
       participantId: string;
     }>();
   if (!run) {
@@ -409,8 +411,17 @@ export async function completeAssessment(input: {
     partialForInfrastructure && input.assessment.status === "no-impact"
       ? "partial-coverage"
       : input.assessment.status;
-  const migrationState =
-    status === "no-impact"
+  const verification = run.kind === "verification";
+  // A verification scan that finds no remaining impact is what turns a merged
+  // migration into a verified one; residual impact returns it to the normal
+  // impact states so a follow-up patch can be requested.
+  const migrationState = verification
+    ? status === "no-impact"
+      ? "verified"
+      : status === "impact-found"
+        ? "impact_found"
+        : "partial_coverage"
+    : status === "no-impact"
       ? "no_impact"
       : status === "impact-found"
         ? "impact_found"
@@ -453,7 +464,7 @@ export async function completeAssessment(input: {
       .prepare(
         `UPDATE repository_migrations
          SET state = ?, dependency_version = ?, assessment_summary = ?,
-             last_failure_category = null, updated_at = ?
+             verified_at = ?, last_failure_category = null, updated_at = ?
          WHERE id = ? AND organization_id = ?`,
       )
       .bind(
@@ -466,6 +477,7 @@ export async function completeAssessment(input: {
           scannedFiles: input.assessment.scannedFiles.length,
           skipped: allSkipped,
         }),
+        migrationState === "verified" ? now : null,
         now,
         run.repositoryMigrationId,
         run.organizationId,
@@ -473,10 +485,16 @@ export async function completeAssessment(input: {
     database
       .prepare(
         `UPDATE migration_runs
-         SET state = 'cleaned', completed_at = ?, updated_at = ?
+         SET state = ?, completed_at = ?, updated_at = ?
          WHERE id = ? AND organization_id = ? AND state = 'analyzing'`,
       )
-      .bind(now, now, input.runId, run.organizationId),
+      .bind(
+        verification && migrationState === "verified" ? "verified" : "cleaned",
+        now,
+        now,
+        input.runId,
+        run.organizationId,
+      ),
     database
       .prepare(
         `UPDATE campaign_participants
@@ -484,7 +502,11 @@ export async function completeAssessment(input: {
          WHERE id = ? AND share_lifecycle_with_provider = true`,
       )
       .bind(
-        status === "no-impact" ? "assessed" : "affected",
+        migrationState === "verified"
+          ? "verified"
+          : status === "no-impact"
+            ? "assessed"
+            : "affected",
         now,
         run.participantId,
       ),
@@ -494,9 +516,10 @@ export async function completeAssessment(input: {
     organizationId: run.organizationId,
     aggregateType: "run",
     aggregateId: input.runId,
-    action: "assessment.completed",
+    action: verification ? "verification.completed" : "assessment.completed",
     payload: {
       status,
+      runKind: run.kind,
       findingCount: input.assessment.findings.length,
       scannedFileCount: input.assessment.scannedFiles.length,
       skippedCount: allSkipped.length,
@@ -547,4 +570,140 @@ export async function failAssessment(
       )
       .bind(now, run.repositoryMigrationId, run.organizationId),
   ]);
+}
+
+/**
+ * Queues a fresh Scanner assessment at the exact merged commit. A migration is
+ * only `verified` once that scan completes clean, so `merged` and `verified`
+ * remain distinguishable states.
+ */
+export async function enqueueVerificationScan(input: {
+  organizationId: string;
+  repositoryMigrationId: string;
+  mergedRunId: string;
+  mergeCommitSha: string;
+  requestUrl: string;
+}): Promise<{ runId: string } | null> {
+  await ensureDatabaseSchema();
+  if (!/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(input.mergeCommitSha)) {
+    return null;
+  }
+  const database = getD1();
+  const context = await database
+    .prepare(
+      `SELECT
+        rm.id AS migrationId,
+        rm.state AS migrationState,
+        rm.campaign_id AS campaignId,
+        rm.migration_spec_id AS specId,
+        ms.revision AS specRevision,
+        rm.repository_id AS repositoryId,
+        gi.status AS scannerStatus
+       FROM repository_migrations rm
+       JOIN migration_specs ms ON ms.id = rm.migration_spec_id
+       JOIN repositories r ON r.id = rm.repository_id
+       JOIN github_installations gi ON gi.id = r.scanner_installation_id
+       WHERE rm.id = ? AND rm.organization_id = ?
+       LIMIT 1`,
+    )
+    .bind(input.repositoryMigrationId, input.organizationId)
+    .first<{
+      migrationId: string;
+      migrationState: string;
+      campaignId: string;
+      specId: string;
+      specRevision: number;
+      repositoryId: string;
+      scannerStatus: string;
+    }>();
+  if (!context || context.scannerStatus !== "active") return null;
+  if (context.migrationState !== "merged") return null;
+
+  const runId = id("run");
+  const now = new Date().toISOString();
+  await database.batch([
+    database
+      .prepare(
+        `INSERT INTO migration_runs (
+          id, organization_id, repository_migration_id, repository_id,
+          campaign_id, migration_spec_id, migration_spec_revision,
+          state, base_sha, kind, merge_commit_sha
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, 'verification', ?)`,
+      )
+      .bind(
+        runId,
+        input.organizationId,
+        context.migrationId,
+        context.repositoryId,
+        context.campaignId,
+        context.specId,
+        context.specRevision,
+        input.mergeCommitSha.toLowerCase(),
+        input.mergeCommitSha.toLowerCase(),
+      ),
+    database
+      .prepare(
+        `UPDATE repository_migrations
+         SET state = 'assessing', latest_run_id = ?, updated_at = ?
+         WHERE id = ? AND organization_id = ? AND state = 'merged'`,
+      )
+      .bind(runId, now, context.migrationId, input.organizationId),
+    database
+      .prepare(
+        `UPDATE migration_runs SET verification_run_id = ?, updated_at = ?
+         WHERE id = ? AND organization_id = ?`,
+      )
+      .bind(runId, now, input.mergedRunId, input.organizationId),
+  ]);
+
+  await appendAuditEvent({
+    organizationId: input.organizationId,
+    aggregateType: "run",
+    aggregateId: runId,
+    action: "verification.requested",
+    payload: {
+      mergedRunId: input.mergedRunId,
+      mergeCommitSha: input.mergeCommitSha.toLowerCase(),
+    },
+  });
+
+  try {
+    const workflow = await new TriggerWorkflowEngine().trigger({
+      task: "assessment-run",
+      payload: { runId, controlPlaneUrl: publicAppUrl(input.requestUrl) },
+      idempotencyKey: `verification:${runId}`,
+      concurrencyKey: `repository:${context.repositoryId}`,
+    });
+    await database
+      .prepare(
+        "UPDATE migration_runs SET trigger_run_id = ?, updated_at = ? WHERE id = ? AND organization_id = ?",
+      )
+      .bind(workflow.id, new Date().toISOString(), runId, input.organizationId)
+      .run();
+  } catch {
+    // Dispatch failure keeps the migration merged-but-unverified rather than
+    // claiming verification that never ran.
+    const failedAt = new Date().toISOString();
+    await database.batch([
+      database
+        .prepare(
+          `UPDATE migration_runs
+           SET state = 'failed', failure_category = 'infrastructure',
+               failure_code = 'verification_dispatch_failed',
+               completed_at = ?, updated_at = ?
+           WHERE id = ? AND organization_id = ?`,
+        )
+        .bind(failedAt, failedAt, runId, input.organizationId),
+      database
+        .prepare(
+          `UPDATE repository_migrations
+           SET state = 'merged', last_failure_category = 'infrastructure',
+               updated_at = ?
+           WHERE id = ? AND organization_id = ? AND state = 'assessing'`,
+        )
+        .bind(failedAt, context.migrationId, input.organizationId),
+    ]);
+    return null;
+  }
+  return { runId };
 }

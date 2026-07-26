@@ -222,38 +222,78 @@ npm run lint
 npm test
 ```
 
+`tests/control-plane.test.ts` runs the real data layer against SQLite plus an
+in-memory object store through the hooks in `tests/support/runtime.ts`. Extend
+that suite rather than mocking the data layer.
+
 ## Honest current limitations
 
-Do not obscure these in product copy or status updates:
+Do not obscure these in product copy or status updates.
+
+Closed since the previous revision (Phases 3-5 spine):
+
+- Model consent is a persisted, versioned grant/revoke command bound to an
+  approver membership, re-checked at a signed gate immediately before any
+  snippet leaves the control plane.
+- A durable `patch-run` workflow exists end to end: acquire source at the
+  recorded commit, deterministic codemod inside customer-authorized paths,
+  optional constrained model residuals, syntax proof, integrity validation,
+  sandbox validation, strict `RunManifestV1` persistence, and cleanup recording.
+- The control plane independently re-validates every patch and refuses to
+  persist one that fails allowed-path, workflow-file, binary, size, base-commit,
+  or hash checks.
+- Patch review renders a real diff, evidence, validation results, integrity
+  issues, and the exact canonical patch SHA-256.
+- Exact-hash approval and idempotent draft-PR publication are implemented, with
+  a default-branch recheck immediately before the write.
+- Post-merge verification scans run at the merged commit; `merged` and
+  `verified` are distinct persisted states.
+- Retention automation is implemented: 24-hour interrupted-run sweeper, 30-day
+  artifact expiry, storage-verified deletion, backoff retry, dead-letter state,
+  and a customer erasure command.
+- A SQLite-backed integration suite proves cross-tenant refusal, role
+  enforcement, consent gating, unauthorized-path refusal, exact-hash approval,
+  publication preconditions, provider privacy, and deletion.
+
+Still open:
 
 1. Trigger task source exists but cannot be deployed without a real Trigger.dev
-   project and credentials.
-2. The assessment analyzer currently runs in the Trigger worker after bounded
-   GitHub reads. It does not execute repository code and does not persist source,
-   but the target architecture requires moving analysis into a no-network E2B
+   project and credentials. `patch-run` and `retention-sweep` have never
+   executed against a real Trigger.dev project.
+2. The assessment analyzer runs in the Trigger worker after bounded GitHub
+   reads. It does not execute repository code and does not persist source, but
+   the target architecture requires moving analysis into a no-network E2B
    analyzer sandbox.
 3. The analyzer is deterministic/pattern-aware, not yet TypeScript compiler +
    ts-morph symbol-aware across aliases and workspaces.
 4. Provider upload and general assisted spec-authoring UI are not implemented;
    the live reference path is the built-in Stripe evidence pipeline.
-5. OpenAI, E2B, transformer, artifact, and PR primitives are not wired into a
-   durable patch workflow.
-6. Model consent has UI copy but no persisted grant/revoke command.
-7. Patch review is a fail-closed empty state; Monaco diff and lazy artifact
-   loading are not implemented.
-8. Exact-hash approval and PR-publication routes/UI are not implemented.
-9. Post-merge verification scan is not implemented.
-10. Deletion tables exist, but scheduled retention/deletion workers and
-    verification do not.
-11. Internal operations screens are not backed by complete diagnostics/retry
-    commands.
-12. Sentry, OpenTelemetry, and metadata-only PostHog are not integrated.
-13. WorkOS is readiness-only. The hosted app uses platform identity plus
+5. Syntax proof comes from the TypeScript parser inside the Trigger worker, not
+   from a sandbox. The parser never executes repository code, but this is a
+   deviation from the "sandbox-backed syntax validation" target.
+6. Sandbox validation runs dependency installation and the declared package
+   scripts in a **single registry-only** sandbox, because carrying prepared
+   dependencies into a second offline sandbox needs a snapshot mechanism that is
+   not implemented. Manifests record `registry_only`, never `none`, whenever a
+   sandbox actually ran. The fully offline validation stage remains open.
+7. Every E2B and OpenAI path is unexercised: no credentials are installed, so
+   validation currently reports `incomplete` and model residuals are skipped.
+8. Patch review is server-rendered with a purpose-built diff. Monaco and lazy
+   per-file artifact fetching are not implemented; the whole patch artifact is
+   decrypted to build the review.
+9. Internal operations screens are not backed by complete diagnostics/retry
+   commands.
+10. Sentry, OpenTelemetry, and metadata-only PostHog are not integrated.
+11. WorkOS is readiness-only. The hosted app uses platform identity plus
     persisted memberships.
-14. Storage is D1/R2 rather than Neon/S3 because the active Sites runtime
+12. Storage is D1/R2 rather than Neon/S3 because the active Sites runtime
     provides those primitives.
-15. No real-time progress subscription or polling API is implemented.
-16. No 20-fixture evaluation corpus exists yet.
+13. `GET /api/runs/:id` returns persisted stage events for polling. No real-time
+    subscription is implemented.
+14. No 20-fixture evaluation corpus exists yet, so none of the recall,
+    precision, or fixture-pass release gates have been measured.
+15. No end-to-end run has been executed against a real GitHub App, repository,
+    sandbox, or pull request. Nothing in Phase 0's exit gate is verified.
 
 ## Ordered implementation plan
 
@@ -495,6 +535,11 @@ draft PR after authorized exact-hash approval.
 Browser/authenticated:
 
 - `POST /api/bootstrap`
+- `POST /api/consents`
+- `POST /api/patches`
+- `POST /api/patches/approve`
+- `POST /api/patches/publish`
+- `GET /api/runs/:id`
 - `GET|POST /api/campaigns`
 - `POST /api/campaigns/approve`
 - `POST /api/campaigns/launch`
@@ -514,6 +559,10 @@ Verified machine ingress:
 - `GET /api/internal/runs/:id/work-packet`
 - `POST /api/internal/runs/:id/assessment-result`
 - `POST /api/internal/runs/:id/failure`
+- `GET /api/internal/runs/:id/patch-packet`
+- `POST /api/internal/runs/:id/patch-result`
+- `POST /api/internal/runs/:id/model-consent`
+- `POST /api/internal/retention/sweep`
 
 Do not add a public API or CLI in v1.
 
@@ -565,6 +614,10 @@ E2B:
 - `E2B_API_KEY`
 - `E2B_TEMPLATE_ID`
 - `E2B_REGISTRY_CIDRS`
+
+Artifact encryption (required before any patch, log, or manifest is stored):
+
+- `ARTIFACT_ENCRYPTION_KEY` (32 bytes, base64 or hex)
 
 Optional future WorkOS bridge:
 

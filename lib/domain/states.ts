@@ -58,6 +58,20 @@ export const RUN_STATES = [
 ] as const;
 export type RunState = (typeof RUN_STATES)[number];
 
+export const RUN_STAGES = [
+  "source_acquisition",
+  "deterministic_codemod",
+  "template_transformation",
+  "model_residuals",
+  "patch_integrity",
+  "dependency_preparation",
+  "offline_validation",
+  "artifact_storage",
+  "manifest_persistence",
+  "sandbox_cleanup",
+] as const;
+export type RunStage = (typeof RUN_STAGES)[number];
+
 export const INVITATION_STATES = [
   "pending",
   "accepted",
@@ -111,22 +125,37 @@ const repositoryMigrationTransitions: Readonly<
 > = {
   invited: ["scanner_connected", "closed"],
   scanner_connected: ["assessing", "closed"],
-  assessing: ["no_impact", "impact_found", "partial_coverage", "closed"],
+  // `verified` is reachable from `assessing` because a post-merge verification
+  // scan is an assessment run whose clean result verifies the merge.
+  assessing: [
+    "no_impact",
+    "impact_found",
+    "partial_coverage",
+    "verified",
+    "closed",
+  ],
   no_impact: ["assessing", "closed"],
   impact_found: ["patcher_required", "assessing", "closed"],
   partial_coverage: ["patcher_required", "assessing", "closed"],
   patcher_required: ["patch_requested", "closed"],
-  patch_requested: ["generating", "closed"],
+  // A patch run that fails or is swept returns the migration to
+  // `patcher_required`: the Patcher App is still installed, but no patch exists.
+  patch_requested: ["generating", "patcher_required", "closed"],
   generating: [
     "validating",
+    // Generation and validation complete inside one durable worker pass, so a
+    // run can reach a review outcome without a separate `validating` dwell.
+    "ready_for_review",
     "validation_failed",
     "validation_incomplete",
+    "patcher_required",
     "closed",
   ],
   validating: [
     "ready_for_review",
     "validation_failed",
     "validation_incomplete",
+    "patcher_required",
     "closed",
   ],
   ready_for_review: ["approved_for_pr", "patch_requested", "closed"],

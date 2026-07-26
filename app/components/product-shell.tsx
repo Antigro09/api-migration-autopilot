@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { AuthenticatedActor } from "@/lib/auth/actor";
-import type { CustomerWorkspaceData } from "@/lib/data/customer";
+import type { CustomerWorkspaceData, PatchReviewData } from "@/lib/data/customer";
+import type { ConsentDisclosure } from "@/lib/domain";
 import type { Workspace } from "@/lib/data/control-plane";
 import type { IntegrationReadiness } from "@/lib/platform/config";
 import { CustomerView } from "./customer-views";
@@ -54,6 +55,8 @@ function ViewRenderer({
   view,
   providerData,
   customerData,
+  patchReview,
+  consentDisclosure,
   integrations,
   workspaceId,
 }: {
@@ -61,6 +64,8 @@ function ViewRenderer({
   view: AppView;
   providerData?: ProviderViewData;
   customerData?: CustomerWorkspaceData;
+  patchReview?: PatchReviewData | null;
+  consentDisclosure: ConsentDisclosure;
   integrations: IntegrationReadiness;
   workspaceId: string;
 }) {
@@ -72,6 +77,8 @@ function ViewRenderer({
       <CustomerView
         view={view}
         data={customerData}
+        patchReview={patchReview}
+        consentDisclosure={consentDisclosure}
         workspaceId={workspaceId}
         integrations={integrations}
       />
@@ -207,6 +214,8 @@ export function ProductShell({
   actor,
   providerData,
   customerData,
+  patchReview,
+  consentDisclosure,
   integrations,
   flash,
 }: {
@@ -216,6 +225,8 @@ export function ProductShell({
   actor: AuthenticatedActor;
   providerData?: ProviderViewData;
   customerData?: CustomerWorkspaceData;
+  patchReview?: PatchReviewData | null;
+  consentDisclosure: ConsentDisclosure;
   integrations: IntegrationReadiness;
   flash?: { tone: "success" | "warning"; message: string };
 }) {
@@ -256,6 +267,8 @@ export function ProductShell({
             view={view}
             providerData={providerData}
             customerData={customerData}
+            patchReview={patchReview}
+            consentDisclosure={consentDisclosure}
             integrations={integrations}
             workspaceId={workspace.organizationId}
           />

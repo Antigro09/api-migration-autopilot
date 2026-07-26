@@ -6,6 +6,7 @@ import type {
   GitHubInstallation,
   GitHubRepository,
 } from "@/lib/integrations/github";
+import { enqueueVerificationScan } from "./assessments";
 
 function id(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -202,6 +203,8 @@ export async function applyPullRequestLifecycle(input: {
   headBranch: string;
   action: string;
   merged: boolean;
+  mergeCommitSha?: string;
+  requestUrl?: string;
 }): Promise<number> {
   await ensureDatabaseSchema();
   if (!input.headBranch.startsWith("migration-autopilot/")) return 0;
@@ -237,9 +240,18 @@ export async function applyPullRequestLifecycle(input: {
     await database.batch([
       database
         .prepare(
-          "UPDATE migration_runs SET state = 'merged', completed_at = ?, updated_at = ? WHERE id = ? AND organization_id = ?",
+          `UPDATE migration_runs
+           SET state = 'merged', merge_commit_sha = ?, completed_at = ?,
+               updated_at = ?
+           WHERE id = ? AND organization_id = ?`,
         )
-        .bind(now, now, run.id, run.organizationId),
+        .bind(
+          input.mergeCommitSha?.toLowerCase() ?? null,
+          now,
+          now,
+          run.id,
+          run.organizationId,
+        ),
       database
         .prepare(
           "UPDATE repository_migrations SET state = 'merged', updated_at = ? WHERE id = ? AND organization_id = ?",
@@ -257,6 +269,15 @@ export async function applyPullRequestLifecycle(input: {
         )
         .bind(now, run.repositoryMigrationId, run.organizationId),
     ]);
+    if (input.mergeCommitSha && input.requestUrl) {
+      await enqueueVerificationScan({
+        organizationId: run.organizationId,
+        repositoryMigrationId: run.repositoryMigrationId,
+        mergedRunId: run.id,
+        mergeCommitSha: input.mergeCommitSha,
+        requestUrl: input.requestUrl,
+      });
+    }
     return 1;
   }
 
