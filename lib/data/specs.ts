@@ -102,7 +102,7 @@ function sourceIdForUrl(
   return artifactId;
 }
 
-function domainChange(
+export function domainChange(
   change: (typeof stripeV20ToV22Spec.changes)[number],
   artifactIds: ReadonlyMap<string, string>,
 ): DomainChange {

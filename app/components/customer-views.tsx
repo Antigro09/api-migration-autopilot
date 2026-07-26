@@ -1,4 +1,5 @@
-import type { CustomerWorkspaceData } from "@/lib/data/customer";
+import type { CustomerWorkspaceData, PatchReviewData } from "@/lib/data/customer";
+import type { ConsentDisclosure } from "@/lib/domain";
 import type { IntegrationReadiness } from "@/lib/platform/config";
 import {
   appHref,
@@ -498,49 +499,279 @@ function ImpactReport({ data }: { data?: CustomerWorkspaceData }) {
   );
 }
 
-function PatchReview() {
+function PatchRequestForm({
+  data,
+  workspaceId,
+}: {
+  data?: CustomerWorkspaceData;
+  workspaceId: string;
+}) {
+  const eligible = (data?.migrations ?? []).filter((migration) =>
+    [
+      "impact_found",
+      "partial_coverage",
+      "patcher_required",
+      "ready_for_review",
+      "validation_failed",
+      "validation_incomplete",
+    ].includes(migration.state),
+  );
+  const ready = eligible.length > 0;
+  return (
+    <form action="/api/patches" method="post" className="patch-request-form">
+      <input name="organizationId" type="hidden" value={workspaceId} />
+      <label className="field">
+        <span>Repository migration</span>
+        <select name="repositoryMigrationId" defaultValue="" required disabled={!ready}>
+          <option value="">Select a migration with recorded impact</option>
+          {eligible.map((migration) => (
+            <option value={migration.id} key={migration.id}>
+              {migration.repositoryOwner}/{migration.repositoryName} —{" "}
+              {migration.campaignName}
+            </option>
+          ))}
+        </select>
+      </label>
+      <fieldset className="validation-choice">
+        <legend>Validation commands to run from your package scripts</legend>
+        {(["lint", "typecheck", "build", "test"] as const).map((category) => (
+          <label key={category}>
+            <input
+              type="checkbox"
+              name="validationCategories"
+              value={category}
+              defaultChecked={category !== "lint"}
+            />
+            <code>{category}</code>
+          </label>
+        ))}
+      </fieldset>
+      <button
+        className={ready ? "button button-primary" : "button button-disabled"}
+        type="submit"
+        disabled={!ready}
+      >
+        Request patch
+      </button>
+      <span>
+        Only paths listed in a completed impact report can be changed. No other
+        command is ever executed.
+      </span>
+    </form>
+  );
+}
+
+function DiffView({ diff }: { diff: PatchReviewData["selectedDiff"] }) {
+  if (!diff || diff.hunks.length === 0) {
+    return (
+      <div className="code-empty">
+        <div className="line-numbers" aria-hidden="true">
+          <span>1</span>
+        </div>
+        <pre>
+          <code>
+            <span className="code-comment">
+              {"// Select a changed file to load its verified diff."}
+            </span>
+          </code>
+        </pre>
+      </div>
+    );
+  }
+  return (
+    <div className="diff-lines" role="table" aria-label={`Diff for ${diff.path}`}>
+      {diff.hunks.map((hunk, hunkIndex) => (
+        <div className="diff-hunk" key={`${hunk.originalStart}-${hunkIndex}`}>
+          <div className="diff-hunk-header" role="row">
+            @@ -{hunk.originalStart},{hunk.originalCount} +{hunk.newStart},
+            {hunk.newCount} @@
+          </div>
+          {hunk.lines.map((line, lineIndex) => (
+            <div
+              className={`diff-line diff-line-${line.kind}`}
+              role="row"
+              key={`${hunkIndex}-${lineIndex}`}
+            >
+              <span className="diff-gutter" aria-hidden="true">
+                {line.originalLine ?? ""}
+              </span>
+              <span className="diff-gutter" aria-hidden="true">
+                {line.newLine ?? ""}
+              </span>
+              <span className="diff-marker" aria-hidden="true">
+                {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " "}
+              </span>
+              <code>{line.text || " "}</code>
+            </div>
+          ))}
+        </div>
+      ))}
+      {diff.truncated ? (
+        <p className="diff-truncated">
+          This file exceeds the review line limit and the diff is truncated.
+          Review the full change in the pull request before merging.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function PatchReview({
+  data,
+  review,
+  workspaceId,
+}: {
+  data?: CustomerWorkspaceData;
+  review?: PatchReviewData | null;
+  workspaceId: string;
+}) {
+  if (!review) {
+    return (
+      <>
+        <PageHeading
+          eyebrow="Customer approval"
+          title="Patch review"
+          description="Review the exact diff, provider evidence, validation output, and unresolved risk before approving an immutable patch hash."
+          actions={<PrivacyLabel>Only your organization</PrivacyLabel>}
+        />
+        <div className="patch-statusbar">
+          <div>
+            <span className="patch-status-icon" aria-hidden="true">±</span>
+            <div>
+              <strong>No generated patch</strong>
+              <span>
+                A patch appears here once a durable run completes and passes
+                integrity validation.
+              </span>
+            </div>
+          </div>
+          <PrivacyLabel>Only your organization</PrivacyLabel>
+        </div>
+        <section className="panel form-panel">
+          <SectionHeading
+            title="Request a patch"
+            description="Requires recorded impact, an active Patcher App installation for that repository, and confirmed validation commands."
+          />
+          <PatchRequestForm data={data} workspaceId={workspaceId} />
+        </section>
+      </>
+    );
+  }
+
+  const selected = review.files.find((file) => file.path === review.selectedPath);
+  const approved = Boolean(review.approvedPatchSha256);
+  const canApprove = review.publishable && !approved;
+  const failedValidation = review.validation.filter(
+    (entry) => entry.outcome === "failed",
+  );
+  const incompleteValidation = review.validation.filter(
+    (entry) => entry.outcome === "incomplete" || entry.outcome === "not_run",
+  );
+
   return (
     <>
       <PageHeading
         eyebrow="Customer approval"
         title="Patch review"
         description="Review the exact diff, provider evidence, validation output, and unresolved risk before approving an immutable patch hash."
-        actions={
-          <button className="button button-disabled" type="button" disabled>
-            Approve for draft PR
-          </button>
-        }
+        actions={<PrivacyLabel>Only your organization</PrivacyLabel>}
       />
 
       <div className="patch-statusbar">
         <div>
           <span className="patch-status-icon" aria-hidden="true">±</span>
           <div>
-            <strong>No patch selected</strong>
-            <span>Generate a patch from a completed assessment</span>
+            <strong>
+              {review.repositoryOwner}/{review.repositoryName}
+            </strong>
+            <span>
+              {review.providerName} · {review.campaignName} ·{" "}
+              {review.runState.replaceAll("_", " ")}
+            </span>
           </div>
         </div>
         <PrivacyLabel>Only your organization</PrivacyLabel>
       </div>
 
+      {review.integrityValid ? null : (
+        <div className="notice notice-warning" role="status">
+          <span className="notice-symbol" aria-hidden="true">!</span>
+          <div>
+            <strong>This patch cannot be published</strong>
+            <p>
+              Integrity, allowed-path, syntax, or base-commit validation failed.
+              Approval is disabled and no pull request can be opened.
+            </p>
+          </div>
+        </div>
+      )}
+      {review.warnRequired && review.integrityValid ? (
+        <div className="notice notice-warning" role="status">
+          <span className="notice-symbol" aria-hidden="true">!</span>
+          <div>
+            <strong>
+              {failedValidation.length > 0
+                ? "Declared validation commands failed"
+                : "Validation is incomplete"}
+            </strong>
+            <p>
+              You may still approve this patch, but the draft pull request will
+              carry a prominent warning describing exactly what did not pass.
+            </p>
+          </div>
+        </div>
+      ) : null}
+      {review.pullRequest ? (
+        <div className="notice notice-success" role="status">
+          <span className="notice-symbol" aria-hidden="true">✓</span>
+          <div>
+            <strong>Draft pull request open</strong>
+            <p>
+              #{review.pullRequest.number} on branch{" "}
+              <code>{review.pullRequest.branch}</code>. It is never merged
+              automatically.
+            </p>
+          </div>
+          <a className="text-link" href={review.pullRequest.url}>
+            Open on GitHub <span aria-hidden="true">→</span>
+          </a>
+        </div>
+      ) : null}
+
       <section className="patch-actions-card">
-        <form action="/api/patches" method="post">
-          <input name="assessmentId" type="hidden" value="" />
-          <input name="modelConsentVersion" type="hidden" value="" />
-          <button className="button button-disabled" type="submit" disabled>
-            Request patch
+        <form action="/api/patches/approve" method="post">
+          <input name="organizationId" type="hidden" value={workspaceId} />
+          <input name="runId" type="hidden" value={review.runId} />
+          <input name="patchHash" type="hidden" value={review.patchSha256} />
+          <input name="approvalIntent" type="hidden" value="open-draft-pr" />
+          <button
+            className={canApprove ? "button button-primary" : "button button-disabled"}
+            type="submit"
+            disabled={!canApprove}
+          >
+            {approved ? "Hash approved" : "Approve exact hash"}
           </button>
-          <span>Requires a completed assessment and current model consent.</span>
+          <span className="mono">{review.patchSha256}</span>
         </form>
         <span className="action-divider" aria-hidden="true" />
-        <form action="/api/patches/approve" method="post">
-          <input name="runId" type="hidden" value="" />
-          <input name="patchHash" type="hidden" value="" />
-          <input name="approvalIntent" type="hidden" value="open-draft-pr" />
-          <button className="button button-disabled" type="submit" disabled>
-            Approve exact hash
+        <form action="/api/patches/publish" method="post">
+          <input name="organizationId" type="hidden" value={workspaceId} />
+          <input name="runId" type="hidden" value={review.runId} />
+          <button
+            className={
+              approved && !review.pullRequest
+                ? "button button-primary"
+                : "button button-disabled"
+            }
+            type="submit"
+            disabled={!approved || Boolean(review.pullRequest)}
+          >
+            Open draft pull request
           </button>
-          <span>Approval is enabled only for the immutable hash shown below.</span>
+          <span>
+            Publication rechecks the default branch commit and the approved hash
+            immediately before writing.
+          </span>
         </form>
       </section>
 
@@ -548,15 +779,39 @@ function PatchReview() {
         <aside className="file-tree">
           <div className="diff-panel-header">
             <strong>Changed files</strong>
-            <span>0</span>
+            <span>{review.files.length}</span>
           </div>
-          <div className="file-tree-empty">
-            <span aria-hidden="true">└</span>
-            <p>No generated files</p>
-          </div>
+          <nav className="file-tree-list" aria-label="Changed files">
+            {review.files.map((file) => (
+              <a
+                key={file.path}
+                href={`/?view=patch&migration=${encodeURIComponent(
+                  review.migrationId,
+                )}&file=${encodeURIComponent(file.path)}`}
+                className={
+                  file.path === review.selectedPath
+                    ? "file-tree-item file-tree-item-active"
+                    : "file-tree-item"
+                }
+                aria-current={file.path === review.selectedPath ? "true" : undefined}
+              >
+                <span className="file-tree-path">{file.path}</span>
+                <span className="file-tree-counts">
+                  <i className="addition-dot" aria-hidden="true" />
+                  {file.additions}
+                  <i className="deletion-dot" aria-hidden="true" />
+                  {file.deletions}
+                </span>
+              </a>
+            ))}
+          </nav>
           <div className="diff-summary">
-            <span><i className="addition-dot" /> 0 additions</span>
-            <span><i className="deletion-dot" /> 0 deletions</span>
+            <span>
+              <i className="addition-dot" /> {review.additions} additions
+            </span>
+            <span>
+              <i className="deletion-dot" /> {review.deletions} deletions
+            </span>
           </div>
         </aside>
 
@@ -564,79 +819,136 @@ function PatchReview() {
           <div className="diff-panel-header">
             <div className="diff-file">
               <span aria-hidden="true">⌘</span>
-              <span>No file selected</span>
+              <span>{review.selectedPath ?? "No file selected"}</span>
             </div>
-            <span className="mono">patch sha256: —</span>
+            <span className="mono">base {review.baseSha.slice(0, 12)}</span>
           </div>
-          <div className="code-empty">
-            <div className="line-numbers" aria-hidden="true">
-              <span>1</span><span>2</span><span>3</span><span>4</span><span>5</span>
-            </div>
-            <pre>
-              <code>
-                <span className="code-comment">
-                  {"// A verified diff will appear here."}
-                </span>
-                {"\n"}
-                <span className="code-comment">
-                  {"// No repository source has been loaded."}
-                </span>
-                {"\n\n"}
-                <span className="code-keyword">await</span>{" "}
-                <span className="code-plain">runAssessment()</span>
-              </code>
-            </pre>
-          </div>
+          <DiffView diff={review.selectedDiff} />
           <div className="diff-footer">
-            <span>Syntax validation —</span>
-            <span>Allowed paths —</span>
-            <span>Base SHA —</span>
+            <span>
+              Integrity {review.integrityValid ? "passed" : "failed"}
+            </span>
+            <span>Allowed paths {review.files.length}</span>
+            <span>Unresolved findings {review.unresolvedFindingCount}</span>
           </div>
         </section>
 
         <aside className="evidence-rail">
           <div className="diff-panel-header">
             <strong>Evidence</strong>
-            <StatusPill>Unavailable</StatusPill>
-          </div>
-          <div className="evidence-empty">
-            <div className="evidence-glyph" aria-hidden="true">◇</div>
-            <h3>Select a changed hunk</h3>
-            <p>
-              Rationale, provider source, rule ID, transformation type, and
-              uncertainty will appear here.
-            </p>
+            <StatusPill tone={review.integrityValid ? "success" : "danger"}>
+              {review.integrityValid ? "Verified" : "Blocked"}
+            </StatusPill>
           </div>
           <div className="evidence-fields">
-            <DefinitionRow label="Rule" value="—" />
-            <DefinitionRow label="Confidence" value="—" />
-            <DefinitionRow label="Transformation" value="—" />
-            <DefinitionRow label="Validation" value="—" />
+            <DefinitionRow
+              label="Rules"
+              value={selected?.ruleIds.join(", ") || "—"}
+            />
+            <DefinitionRow
+              label="Transformation"
+              value={
+                selected?.ruleIds.length ? "Deterministic codemod" : "Model residual"
+              }
+            />
+            <DefinitionRow
+              label="Rationale"
+              value={selected?.rationale.join(" ") || "—"}
+            />
+            <DefinitionRow
+              label="Model consent"
+              value={review.modelConsentGranted ? "Granted" : "Not granted"}
+            />
           </div>
+          {review.integrityIssues.length > 0 ? (
+            <ul className="evidence-issues">
+              {review.integrityIssues.map((issue, index) => (
+                <li key={`${issue.code}-${index}`}>
+                  <code>{issue.code}</code>
+                  <span>{issue.message}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </aside>
       </div>
 
       <section className="panel validation-panel">
         <SectionHeading
           title="Validation"
-          description="Install, lint, type-check, build, and test output is preserved when code checks fail."
-          action={<StatusPill>Not started</StatusPill>}
+          description="Only commands declared in your package scripts are run, in an isolated sandbox with lifecycle scripts disabled."
+          action={
+            <StatusPill
+              tone={
+                failedValidation.length > 0
+                  ? "danger"
+                  : incompleteValidation.length > 0
+                    ? "warning"
+                    : "success"
+              }
+            >
+              {failedValidation.length > 0
+                ? "Failed"
+                : incompleteValidation.length > 0
+                  ? "Incomplete"
+                  : "Passed"}
+            </StatusPill>
+          }
         />
-        <div className="validation-steps">
-          {["Integrity", "Syntax", "Type-check", "Build", "Tests"].map((step) => (
-            <div key={step}>
-              <span className="validation-step-icon">—</span>
-              <strong>{step}</strong>
-              <small>Waiting for patch</small>
-            </div>
-          ))}
-        </div>
+        {review.validation.length === 0 ? (
+          <EmptyState
+            symbol="—"
+            title="No validation commands were recorded"
+            description="The run produced no validation result, so this patch is treated as validation incomplete."
+            compact
+          />
+        ) : (
+          <div className="validation-steps">
+            {review.validation.map((entry) => (
+              <div key={`${entry.category}-${entry.command}`}>
+                <span className="validation-step-icon">
+                  {entry.outcome === "passed"
+                    ? "✓"
+                    : entry.outcome === "failed"
+                      ? "×"
+                      : "—"}
+                </span>
+                <strong>{entry.category}</strong>
+                <small>
+                  <code>{entry.command}</code> · {entry.summary}
+                  {entry.logAvailable ? " · log retained" : ""}
+                </small>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="panel form-panel">
+        <SectionHeading
+          title="Regenerate"
+          description="Request a fresh patch against the current default-branch commit if this one is stale or rejected."
+        />
+        <PatchRequestForm data={data} workspaceId={workspaceId} />
       </section>
     </>
   );
 }
 
-function Policies() {
+function Policies({
+  data,
+  review,
+  disclosure,
+  workspaceId,
+}: {
+  data?: CustomerWorkspaceData;
+  review?: PatchReviewData | null;
+  disclosure: ConsentDisclosure;
+  workspaceId: string;
+}) {
+  const migrations = data?.migrations ?? [];
+  const selected = review?.migrationId ?? migrations[0]?.id ?? "";
+  const granted = review?.modelConsentGranted ?? false;
   return (
     <>
       <PageHeading
@@ -649,40 +961,104 @@ function Policies() {
         <div className="policy-main">
           <section className="panel">
             <SectionHeading
-              title="External model processing"
+              title={disclosure.title}
               description="Consent is required before any minimized code snippet can leave the control plane."
-              action={<StatusPill tone="warning">Not granted</StatusPill>}
+              action={
+                <StatusPill tone={granted ? "success" : "warning"}>
+                  {granted ? "Granted" : "Not granted"}
+                </StatusPill>
+              }
             />
-            <div className="policy-setting">
+            <dl className="stacked-definitions">
+              <DefinitionRow label="Disclosure version" value={disclosure.version} mono />
+              <DefinitionRow
+                label="Vendor"
+                value={`${disclosure.vendor.name} — ${disclosure.vendor.service}`}
+              />
+              <DefinitionRow label="Region" value={disclosure.vendor.region} />
+              <DefinitionRow
+                label="Required role"
+                value={disclosure.requiredRoles.join(" or ")}
+              />
+            </dl>
+
+            <div className="consent-columns">
               <div>
-                <strong>Allow model-assisted classification and patching</strong>
-                <p>
-                  Only affected snippets, approved migration evidence, local
-                  conventions, and allowed paths may be sent. Repository
-                  credentials are never included.
-                </p>
+                <h3>What may be sent</h3>
+                <ul className="consent-list">
+                  {disclosure.dataCategories.map((category) => (
+                    <li key={category.id}>
+                      <strong>{category.label}</strong>
+                      <span>{category.description}</span>
+                    </li>
+                  ))}
+                </ul>
               </div>
-              <button
-                className="toggle-control"
-                type="button"
-                role="switch"
-                aria-checked="false"
-                aria-label="Allow model-assisted processing"
-              >
-                <span />
-              </button>
+              <div>
+                <h3>What is never sent</h3>
+                <ul className="consent-list consent-list-negative">
+                  {disclosure.neverTransmitted.map((entry) => (
+                    <li key={entry}>
+                      <span>{entry}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             </div>
+
             <div className="notice notice-neutral">
               <span className="notice-symbol" aria-hidden="true">i</span>
               <div>
                 <strong>Data retention disclosure</strong>
-                <p>
-                  API requests use storage disabled where supported. This is not
-                  equivalent to Zero Data Retention; the consent record includes
-                  the current vendor policy.
-                </p>
+                <p>{disclosure.retentionDisclosure}</p>
               </div>
             </div>
+
+            <form action="/api/consents" method="post" className="consent-form">
+              <input name="organizationId" type="hidden" value={workspaceId} />
+              <input name="kind" type="hidden" value="external_model_processing" />
+              <input
+                name="acknowledgedPolicyVersion"
+                type="hidden"
+                value={disclosure.version}
+              />
+              <input
+                name="decision"
+                type="hidden"
+                value={granted ? "revoke" : "grant"}
+              />
+              <label className="field">
+                <span>Repository migration</span>
+                <select
+                  name="repositoryMigrationId"
+                  defaultValue={selected}
+                  required
+                  disabled={migrations.length === 0}
+                >
+                  <option value="">Select a migration</option>
+                  {migrations.map((migration) => (
+                    <option value={migration.id} key={migration.id}>
+                      {migration.repositoryOwner}/{migration.repositoryName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className={
+                  migrations.length === 0
+                    ? "button button-disabled"
+                    : granted
+                      ? "button button-secondary"
+                      : "button button-primary"
+                }
+                type="submit"
+                disabled={migrations.length === 0}
+              >
+                {granted
+                  ? "Revoke model processing consent"
+                  : "Grant model processing consent"}
+              </button>
+            </form>
           </section>
 
           <section className="panel">
@@ -721,13 +1097,16 @@ function Policies() {
 
         <aside className="policy-side">
           <section className="panel retention-card">
-            <div className="panel-kicker">Default retention</div>
+            <div className="panel-kicker">Enforced retention</div>
             <h2>Customer artifacts</h2>
             <strong className="retention-value">30 days</strong>
-            <p>Snippets, diffs, and validation logs expire automatically.</p>
+            <p>
+              Diffs and validation logs are queued for deletion automatically and
+              the delete is verified against object storage.
+            </p>
             <hr />
             <DefinitionRow label="Source archives" value="≤ 24 hours" />
-            <DefinitionRow label="Sandboxes" value="Immediate cleanup" />
+            <DefinitionRow label="Interrupted runs" value="Swept at 24 hours" />
             <DefinitionRow label="Audit metadata" value="12 months" />
           </section>
           <section className="panel">
@@ -738,7 +1117,7 @@ function Policies() {
               customer-granted, time-limited, and audited.
             </p>
             <button className="button button-secondary button-block" type="button" disabled>
-              No source artifacts
+              No active support grant
             </button>
           </section>
         </aside>
@@ -782,17 +1161,34 @@ function CustomerAudit() {
 export function CustomerView({
   view,
   data,
+  patchReview,
+  consentDisclosure,
   workspaceId,
   integrations,
 }: {
   view: AppView;
   data?: CustomerWorkspaceData;
+  patchReview?: PatchReviewData | null;
+  consentDisclosure: ConsentDisclosure;
   workspaceId: string;
   integrations: IntegrationReadiness;
 }) {
   if (view === "impact") return <ImpactReport data={data} />;
-  if (view === "patch") return <PatchReview />;
-  if (view === "policies") return <Policies />;
+  if (view === "patch") {
+    return (
+      <PatchReview data={data} review={patchReview} workspaceId={workspaceId} />
+    );
+  }
+  if (view === "policies") {
+    return (
+      <Policies
+        data={data}
+        review={patchReview}
+        disclosure={consentDisclosure}
+        workspaceId={workspaceId}
+      />
+    );
+  }
   if (view === "audit") return <CustomerAudit />;
   return (
     <Migrations

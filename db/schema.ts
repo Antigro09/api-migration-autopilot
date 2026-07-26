@@ -14,6 +14,7 @@ import type {
   MigrationSpecV1,
   RepositoryMigrationState,
   RunManifestV1,
+  RunStage,
   RunState,
   ValidationOutcome,
 } from "../lib/domain";
@@ -415,6 +416,7 @@ export const repositoryMigrations = sqliteTable(
       | "unsupported"
       | null
     >(),
+    verifiedAt: text("verified_at"),
     closedAt: text("closed_at"),
     createdAt: text("created_at").notNull().default(currentTimestamp),
     updatedAt: text("updated_at").notNull().default(currentTimestamp),
@@ -504,6 +506,13 @@ export const migrationRuns = sqliteTable(
     failureCode: text("failure_code"),
     manifest: text("manifest", { mode: "json" }).$type<RunManifestV1 | null>(),
     manifestSha256: text("manifest_sha256"),
+    kind: text("kind")
+      .$type<"assessment" | "patch" | "verification">()
+      .notNull()
+      .default("assessment"),
+    mergeCommitSha: text("merge_commit_sha"),
+    verificationRunId: text("verification_run_id"),
+    costMicroUsd: integer("cost_micro_usd").notNull().default(0),
     createdAt: text("created_at").notNull().default(currentTimestamp),
     startedAt: text("started_at"),
     completedAt: text("completed_at"),
@@ -548,6 +557,7 @@ export const artifacts = sqliteTable(
       .default("active"),
     expiresAt: text("expires_at"),
     deletedAt: text("deleted_at"),
+    deletionVerifiedAt: text("deletion_verified_at"),
     createdAt: text("created_at").notNull().default(currentTimestamp),
   },
   (table) => [
@@ -728,6 +738,8 @@ export const deletionJobs = sqliteTable(
       .$type<"run_completed" | "retention_expired" | "customer_request">()
       .notNull(),
     hardDeadlineAt: text("hard_deadline_at").notNull(),
+    nextAttemptAt: text("next_attempt_at").notNull().default(currentTimestamp),
+    storageKey: text("storage_key").notNull().default(""),
     attemptCount: integer("attempt_count").notNull().default(0),
     lastErrorCode: text("last_error_code"),
     completedAt: text("completed_at"),
@@ -739,6 +751,42 @@ export const deletionJobs = sqliteTable(
     index("deletion_jobs_status_deadline_idx").on(
       table.status,
       table.hardDeadlineAt,
+    ),
+    index("deletion_jobs_status_attempt_idx").on(
+      table.status,
+      table.nextAttemptAt,
+    ),
+  ],
+);
+
+export const runStageEvents = sqliteTable(
+  "run_stage_events",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    runId: text("run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    stage: text("stage").$type<RunStage>().notNull(),
+    status: text("status")
+      .$type<"started" | "completed" | "skipped" | "failed">()
+      .notNull(),
+    detail: text("detail", { mode: "json" }).$type<JsonObject>().notNull(),
+    occurredAt: text("occurred_at").notNull(),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    uniqueIndex("run_stage_events_run_sequence_uidx").on(
+      table.runId,
+      table.sequence,
+    ),
+    index("run_stage_events_org_run_idx").on(
+      table.organizationId,
+      table.runId,
+      table.occurredAt,
     ),
   ],
 );

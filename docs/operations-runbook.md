@@ -22,6 +22,19 @@ Generate `GITHUB_SETUP_STATE_SECRET` and `WORKFLOW_CALLBACK_SECRET` as
 independent, high-entropy values. The latter must be identical in Sites and the
 Trigger.dev project environment.
 
+Generate `ARTIFACT_ENCRYPTION_KEY` as 32 random bytes, base64 or hex encoded:
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
+```
+
+Every stored patch, validation log, and run manifest is encrypted with
+AES-256-GCM under this key. Its identifier is derived from the key material and
+recorded on each artifact, so rotating the key makes previously stored artifacts
+unreadable by design; treat rotation as an erasure event and drain the deletion
+queue first. Without this setting the patch workflow fails closed and no patch
+can be persisted or reviewed.
+
 ## GitHub App registration
 
 Scanner App:
@@ -121,3 +134,55 @@ npm test
 Then perform the live acceptance sequence in an owned private GitHub
 repository. Every number shown to a customer or provider must be traceable to a
 persisted row or event.
+
+## Retention and deletion
+
+The `retention-sweep` Trigger.dev schedule calls
+`POST /api/internal/retention/sweep` hourly with the workflow callback secret.
+One pass does three things, in order:
+
+1. Sweeps runs stuck in a non-terminal state for more than 24 hours: the run is
+   failed with `interrupted_run_ttl` and every source-derived artifact is queued
+   for deletion.
+2. Queues artifacts past their retention window (24 hours for source-derived
+   scratch material, 30 days for diffs and validation logs, 12 months for
+   audit manifests).
+3. Drains the deletion queue. A delete is only recorded after object storage
+   confirms the key is gone. Failures retry with exponential backoff up to eight
+   attempts, then dead-letter with the artifact marked `deletion_failed`.
+
+To verify deletion for an organization:
+
+```sql
+SELECT kind, lifecycle_state, deleted_at, deletion_verified_at
+FROM artifacts WHERE organization_id = ?;
+
+SELECT status, attempt_count, last_error_code, hard_deadline_at
+FROM deletion_jobs WHERE organization_id = ? AND status <> 'completed';
+```
+
+Any row in `deletion_jobs` with `status = 'failed'` is a retention incident:
+investigate the object storage error, resolve it, then reset the job to
+`pending` with `next_attempt_at` set to now so the next sweep retries it.
+
+If the schedule is unavailable, run one pass manually:
+
+```bash
+curl -X POST "$APP_BASE_URL/api/internal/retention/sweep" \
+  -H "authorization: Bearer $WORKFLOW_CALLBACK_SECRET" \
+  -H 'content-type: application/json' -d '{}'
+```
+
+## Patch publication incidents
+
+A run can only open a draft pull request when all of the following hold, each
+re-checked at publication time and not merely at generation time:
+
+- the persisted patch re-hashes to the recorded approval hash,
+- the patch integrity record is valid,
+- the Patcher App installation for that repository is active,
+- the default-branch commit still equals the run's base commit.
+
+A stale base commit records `failure_code = 'default_branch_moved'` and requires
+a fresh patch and a fresh approval. Never resolve this by editing the recorded
+base commit.

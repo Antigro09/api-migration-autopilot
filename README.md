@@ -30,9 +30,24 @@ an unconfigured external service is visibly unavailable.
   OpenAI and E2B adapters, and idempotent draft-PR publication primitives
 - D1 persistence, R2 encrypted-artifact boundary, tenant filters, and
   hash-chained audit events
+- Versioned external-model-processing consent with grant/revoke commands and a
+  fail-closed re-check immediately before any snippet leaves the control plane
+- A durable patch workflow that acquires source at the recorded commit, runs the
+  deterministic codemod inside customer-authorized paths only, proves syntax
+  with the TypeScript parser, and returns a strictly validated result
+- Independent control-plane re-validation of every patch: a patch that fails
+  allowed-path, workflow-file, binary, size, base-commit, or hash checks is
+  never persisted as reviewable work
+- Customer patch review with a real file-by-file diff, evidence, validation
+  results, integrity issues, and the exact canonical patch SHA-256
+- Exact-hash approval bound to an approver membership, then idempotent draft-PR
+  publication that rechecks the default-branch commit immediately before writing
+- Post-merge verification scans that keep `merged` and `verified` distinct
+- Retention automation: a 24-hour interrupted-run sweeper, 30-day artifact
+  expiry, storage-verified deletion, retry with backoff, and a dead-letter state
 
-The patch-generation, sandbox-validation, exact-hash approval, PR publication,
-post-merge verification, and retention automation workflows are the next
+Provider onboarding beyond the built-in reference campaign, ts-morph
+symbol-aware analysis, and the operations/telemetry surfaces are the next
 implementation phases. See [CLAUDE_HANDOFF.md](./CLAUDE_HANDOFF.md).
 
 ## Architecture
@@ -58,6 +73,15 @@ persisted, sent to a model, or sent to a sandbox.
 
 Detailed design is in [docs/architecture.md](./docs/architecture.md), and the
 security analysis is in [docs/threat-model.md](./docs/threat-model.md).
+
+## Verifying the invariants
+
+`npm test` runs type checking, the unit and integration suites, a production
+build, and assertions against the built worker bundle. The integration suite in
+`tests/control-plane.test.ts` runs the real data layer against SQLite and an
+in-memory object store, and covers cross-tenant refusal, role enforcement,
+consent gating, unauthorized-path and workflow-file refusal, exact-hash
+approval, publication preconditions, provider privacy, and deletion proof.
 
 ## Local setup
 

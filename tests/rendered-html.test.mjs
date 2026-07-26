@@ -25,3 +25,35 @@ test("production bundle declares persistent storage and redacted health readines
   assert.match(wrangler, /"binding":\s*"DB"/);
   assert.match(wrangler, /"binding":\s*"ARTIFACTS"/);
 });
+
+test("production bundle exposes the full patch lifecycle as signed or authenticated routes", async () => {
+  const server = await readFile(new URL("server/index.js", buildRoot), "utf8");
+  for (const route of [
+    "/api/consents",
+    "/api/patches",
+    "/api/patches/approve",
+    "/api/patches/publish",
+    "/api/runs/:id",
+    "/api/internal/runs/:id/patch-packet",
+    "/api/internal/runs/:id/patch-result",
+    "/api/internal/runs/:id/model-consent",
+    "/api/internal/retention/sweep",
+  ]) {
+    assert.match(
+      server,
+      new RegExp(`route:${route.replaceAll("/", "\\/")}(?:"|')`),
+      `expected the production bundle to register ${route}`,
+    );
+  }
+});
+
+test("production bundle keeps the publication and consent invariants in shipped copy", async () => {
+  const server = await readFile(new URL("server/index.js", buildRoot), "utf8");
+  // The exact-hash approval intent and its refusal path must survive bundling.
+  assert.match(server, /open-draft-pr/);
+  assert.match(server, /external-model-processing\/\d{4}-\d{2}-\d{2}/);
+  assert.match(server, /Approve exact hash/);
+  assert.match(server, /never merged\s*\n?\s*automatically|never merged/i);
+  // No auto-merge affordance may be shipped.
+  assert.doesNotMatch(server, /"PUT",\s*path:\s*`?[^`"]*\/pulls\/[^`"]*\/merge/);
+});
