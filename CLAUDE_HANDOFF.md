@@ -77,6 +77,14 @@ Stripe branding.
 
 Version: `0.1.0-alpha.1`.
 
+Private production URL:
+`https://api-migration-autopilot.young-corgi-3741.chatgpt.site`
+
+Sites project ID is persisted in `.openai/hosting.json`. Access is currently
+owner-only (`custom` policy, one allowed account, no groups). `APP_BASE_URL` is
+configured in the hosted environment. Do not make the site public as part of
+normal implementation work.
+
 The first real production slice is implemented:
 
 ### Control plane and identity

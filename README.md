@@ -126,6 +126,10 @@ setup, failure classification, safe retries, and incident response.
 
 Version: `0.1.0-alpha.1`.
 
+Private hosted control plane:
+[api-migration-autopilot.young-corgi-3741.chatgpt.site](https://api-migration-autopilot.young-corgi-3741.chatgpt.site).
+Access is owner-only until collaborators are explicitly added.
+
 This is a real but incomplete private alpha. External credentials and partner
 accounts are intentionally not committed. The system fails closed when they
 are absent.
