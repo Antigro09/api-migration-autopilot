@@ -8,10 +8,56 @@ const {
   safeRetryRun,
   verifyAuditAggregate,
 } = await import("@/lib/data/operations");
+const {
+  ensureInternalOperatorWorkspace,
+  resolveTenant,
+} = await import("@/lib/data/control-plane");
 const { seedPatchRun, seedTenant } = await import("./support/factory");
 
 beforeEach(() => {
   resetControlPlane();
+});
+
+test("an allowlisted operator gets one auditable internal workspace without manual provisioning", async () => {
+  await assert.rejects(
+    ensureInternalOperatorWorkspace({
+      id: "usr_viewer",
+      platformRole: "viewer",
+    }),
+    (error: unknown) =>
+      (error as { code?: string }).code === "FORBIDDEN",
+  );
+
+  const actor = {
+    id: "usr_allowlisted_operator",
+    platformRole: "operator" as const,
+  };
+  const organizationId = await ensureInternalOperatorWorkspace(actor);
+  assert.equal(await ensureInternalOperatorWorkspace(actor), organizationId);
+
+  const context = await resolveTenant(actor.id, organizationId);
+  assert.equal(context?.workspace.kind, "internal");
+  assert.equal(context?.workspace.role, "operator");
+
+  const counts = await getD1()
+    .prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM organizations WHERE id = ?) AS organizations,
+        (SELECT COUNT(*) FROM memberships
+          WHERE organization_id = ? AND workos_user_id = ?) AS memberships,
+        (SELECT COUNT(*) FROM audit_events
+          WHERE organization_id = ?) AS audits`,
+    )
+    .bind(
+      organizationId,
+      organizationId,
+      `siwc:${actor.id}`,
+      organizationId,
+    )
+    .first<{ organizations: number; memberships: number; audits: number }>();
+  assert.equal(counts?.organizations, 1);
+  assert.equal(counts?.memberships, 1);
+  assert.equal(counts?.audits, 2);
 });
 
 async function internalOperator() {

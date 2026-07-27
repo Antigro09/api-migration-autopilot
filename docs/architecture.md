@@ -189,6 +189,9 @@ Internal operations uses opaque organization/run identifiers and metadata-only
 queries. It can verify an audit chain, create a new immutable retry run after
 live GitHub/base-commit checks, requeue a failed deletion, and resolve alerts;
 it cannot edit hashes, base commits, approvals, or publication state.
+An email explicitly allowlisted in production receives a deterministic,
+audited internal organization and membership on first sign-in, so access does
+not depend on a database edit or operator shell command.
 
 Support personnel have no source access by default. An internal operator
 requests access to one run for a stated purpose; a customer admin or approver

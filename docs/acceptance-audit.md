@@ -25,7 +25,7 @@ E2B, OpenAI, Resend, or DNS run.
 | Spec-driven assessment | Approved `MigrationSpecV1` detectors drive npm/pnpm/Yarn/workspace resolution and TypeScript/ts-morph symbol-aware findings |
 | Offline analyzer boundary | Production task transfers normalized source but no credentials into a deny-all-network E2B analyzer and persists encrypted execution evidence |
 | Workflow callback idempotency | Durable exact-result receipts serialize concurrent delivery, return the original response on replay, and refuse a conflicting result |
-| Internal operations | Redacted provider/run/deletion/cost health, immutable safe retries, audit-chain verification, and persisted alert lifecycle |
+| Internal operations | Allowlisted first-sign-in provisioning, redacted provider/run/deletion/cost health, immutable safe retries, audit-chain verification, and persisted alert lifecycle |
 | Support access | Customer-approved, exact-run, 30-minute-to-24-hour grants with expiry and read auditing; no source access by default |
 | Telemetry boundary | Strict allowlist, salted opaque identifiers, source/credential rejection, and sanitized OTLP/Sentry/PostHog delivery |
 | Patch review delivery | Metadata-only initial response, encrypted expiring per-file artifacts, tenant-scoped lazy reads, self-hosted Monaco, and accessible fallback |
@@ -35,7 +35,7 @@ E2B, OpenAI, Resend, or DNS run.
 
 Automated gate at this revision:
 
-- 85 unit/integration/security/accessibility tests
+- 86 unit/integration/security/accessibility tests
 - 6 rendered-production-bundle and payload-budget tests
 - 24-repository assessment evaluation: 100% recall, precision, and status accuracy
 - type checking, lint, and production build pass

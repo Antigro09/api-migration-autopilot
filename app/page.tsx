@@ -1,5 +1,6 @@
 import { getAuthenticatedActor } from "@/lib/auth/actor";
 import {
+  ensureInternalOperatorWorkspace,
   listAuditEvents,
   listCampaigns,
   providerDashboard,
@@ -220,7 +221,11 @@ export default async function Home({ searchParams }: HomeProps) {
   const actor = await getAuthenticatedActor();
   if (!actor) return <SignInScreen />;
 
-  const organizationId = first(query.organization);
+  const operatorOrganizationId =
+    actor.platformRole === "operator"
+      ? await ensureInternalOperatorWorkspace(actor)
+      : undefined;
+  const organizationId = first(query.organization) ?? operatorOrganizationId;
   const context = await resolveTenant(actor.id, organizationId);
   if (!context) {
     return <WorkspaceOnboarding actor={actor} error={first(query.error)} />;

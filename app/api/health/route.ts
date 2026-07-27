@@ -12,6 +12,9 @@ export async function GET(): Promise<Response> {
   } catch {
     // Detailed database errors remain in protected Worker logs.
   }
+  const artifactEncryptionConfigured = Boolean(
+    process.env.ARTIFACT_ENCRYPTION_KEY?.trim(),
+  );
   const integrations = integrationReadiness();
   const configuredIntegrations = Object.values(integrations).filter(
     ({ configured }) => configured,
@@ -19,13 +22,20 @@ export async function GET(): Promise<Response> {
 
   return Response.json(
     {
-      status: env.DB && env.ARTIFACTS && schemaReady ? "ready" : "degraded",
+      status:
+        env.DB &&
+        env.ARTIFACTS &&
+        schemaReady &&
+        artifactEncryptionConfigured
+          ? "ready"
+          : "degraded",
       service: "api-migration-autopilot",
       version: "0.4.0-alpha.1",
       storage: {
         database: Boolean(env.DB),
         artifacts: Boolean(env.ARTIFACTS),
         schema: schemaReady,
+        encryption: artifactEncryptionConfigured,
       },
       integrations: {
         configured: configuredIntegrations,

@@ -2,6 +2,7 @@ import { getD1 } from "@/db";
 import { ensureDatabaseSchema } from "@/db/runtime";
 import {
   createAuditEvent,
+  sha256Hex,
   type CampaignState,
   type JsonObject,
   type OrganizationKind,
@@ -9,6 +10,7 @@ import {
   type TenantContext,
 } from "@/lib/domain";
 import { DomainError } from "@/lib/domain/errors";
+import type { AuthenticatedActor } from "@/lib/auth/actor";
 
 export type Workspace = {
   organizationId: string;
@@ -70,6 +72,8 @@ type CampaignInput = {
 const IDENTIFIER = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const PACKAGE_NAME =
   /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/i;
+const INTERNAL_OPERATIONS_ORGANIZATION_ID = "org_internal_operations";
+const INTERNAL_OPERATIONS_WORKOS_ID = "internal:operations";
 
 function id(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -141,10 +145,13 @@ async function nextAuditEvent(input: {
   });
 }
 
-function auditInsert(event: Awaited<ReturnType<typeof nextAuditEvent>>) {
+function auditInsert(
+  event: Awaited<ReturnType<typeof nextAuditEvent>>,
+  ignoreConflict = false,
+) {
   return getD1()
     .prepare(
-      `INSERT INTO audit_events (
+      `${ignoreConflict ? "INSERT OR IGNORE" : "INSERT"} INTO audit_events (
         id, organization_id, aggregate_type, aggregate_id, sequence, action,
         actor_membership_id, payload, previous_hash, event_hash, occurred_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -198,6 +205,77 @@ export async function listWorkspaces(actorId: string): Promise<Workspace[]> {
     .bind(actorKey)
     .all<Workspace>();
   return result.results;
+}
+
+/**
+ * Gives a production allowlisted operator an auditable internal workspace on
+ * first sign-in. Deterministic rows make concurrent cold starts safe and
+ * remove any need for manual database provisioning.
+ */
+export async function ensureInternalOperatorWorkspace(
+  actor: Pick<AuthenticatedActor, "id" | "platformRole">,
+): Promise<string> {
+  if (actor.platformRole !== "operator") {
+    throw new DomainError(
+      "FORBIDDEN",
+      "Only an allowlisted internal operator can provision this workspace.",
+    );
+  }
+  await ensureDatabaseSchema();
+  const actorDigest = (await sha256Hex(actor.id)).slice(0, 24);
+  const membershipId = `mem_internal_${actorDigest}`;
+  const now = new Date().toISOString();
+  const organizationEvent = await createAuditEvent({
+    id: "evt_internal_operations_created",
+    organizationId: INTERNAL_OPERATIONS_ORGANIZATION_ID,
+    aggregateType: "organization",
+    aggregateId: INTERNAL_OPERATIONS_ORGANIZATION_ID,
+    sequence: 1,
+    action: "organization.created",
+    actorMembershipId: membershipId,
+    occurredAt: now,
+    payload: { kind: "internal", provisionedBy: "operator_allowlist" },
+    previousHash: null,
+  });
+  const membershipEvent = await createAuditEvent({
+    id: `evt_internal_operator_${actorDigest}`,
+    organizationId: INTERNAL_OPERATIONS_ORGANIZATION_ID,
+    aggregateType: "membership",
+    aggregateId: membershipId,
+    sequence: 1,
+    action: "operations.operator_provisioned",
+    actorMembershipId: membershipId,
+    occurredAt: now,
+    payload: { source: "operator_allowlist" },
+    previousHash: null,
+  });
+  const database = getD1();
+  await database.batch([
+    database
+      .prepare(
+        `INSERT OR IGNORE INTO organizations (
+          id, workos_organization_id, name, kind
+        ) VALUES (?, ?, 'API Migration Autopilot Operations', 'internal')`,
+      )
+      .bind(
+        INTERNAL_OPERATIONS_ORGANIZATION_ID,
+        INTERNAL_OPERATIONS_WORKOS_ID,
+      ),
+    database
+      .prepare(
+        `INSERT OR IGNORE INTO memberships (
+          id, organization_id, workos_user_id, role, status
+        ) VALUES (?, ?, ?, 'operator', 'active')`,
+      )
+      .bind(
+        membershipId,
+        INTERNAL_OPERATIONS_ORGANIZATION_ID,
+        `siwc:${actor.id}`,
+      ),
+    auditInsert(organizationEvent, true),
+    auditInsert(membershipEvent, true),
+  ]);
+  return INTERNAL_OPERATIONS_ORGANIZATION_ID;
 }
 
 export async function resolveTenant(

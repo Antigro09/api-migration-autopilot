@@ -61,7 +61,8 @@ an unconfigured external service is visibly unavailable.
   customer export, and customer-requested early erasure
 - Internal operations with redacted run health and usage, immutable safe
   retries, deletion recovery, audit-chain verification, and provider branding
-  approval
+  approval; an allowlisted founder receives one audited internal workspace on
+  first sign-in without manual database provisioning
 - Customer-approved support requests scoped to one run and at most 24 hours;
   every source-bearing read is tenant-checked, expiry-checked, and audited
 - A fail-closed telemetry boundary for OpenTelemetry, Sentry, and metadata-only
