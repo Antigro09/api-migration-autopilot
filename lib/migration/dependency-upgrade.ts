@@ -1,4 +1,9 @@
-import { applyEdits, modify, parse, type ParseError } from "jsonc-parser";
+import {
+  applyEdits,
+  modify,
+  parse,
+  type ParseError,
+} from "jsonc-parser/lib/esm/main.js";
 import semver from "semver";
 import type {
   DependencyResolution,
