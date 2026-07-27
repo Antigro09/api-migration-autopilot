@@ -1,636 +1,289 @@
-# Claude continuation handoff
+# Claude handoff: Phase 6 operations, observability, and live acceptance
 
-## Instruction to Claude
+## Mission
 
-Continue building this repository into the complete API Migration Autopilot
-private MVP described below. Treat the existing implementation as production
-code, not a disposable prototype. Inspect the code and run the verification
-commands before editing. Preserve the working first slice, close the remaining
-gaps in the ordered phases, and do not replace real integrations with mocks,
-seeded dashboards, fake jobs, staged results, or “demo mode.”
+Complete the final production-alpha phase of API Migration Autopilot:
+operational safety, metadata-only observability, support-access controls,
+lazy-loaded Monaco patch review, accessibility/performance hardening, and the
+real external-account acceptance sequence.
 
-Do not claim a phase is complete unless it works against real accounts and
-persisted data. When credentials are unavailable, implement the production
-adapter and fail closed in the UI; never fabricate success. Never merge,
-deploy customer code, write to a default branch, change GitHub workflows, send
-credentials to a model/sandbox, or expose repository-derived detail to a
-provider.
+This is production software, not a YC simulation. Do not add mock jobs, seeded
+counts, fake repositories, staged validation, a demo persona switcher,
+autonomous merge, default-branch writes, workflow-file edits, or
+provider-visible repository detail. If an external account or credential is
+unavailable, keep the production adapter fail-closed and record the exact
+unverified acceptance item.
 
-Start by reading:
+Do not rewrite the modular monolith or replace Sites identity, D1, or R2 during
+this phase. The current provider-neutral boundaries are intentional.
+
+## Start here
+
+Read, in order:
 
 1. `README.md`
-2. `docs/architecture.md`
-3. `docs/threat-model.md`
-4. `docs/operations-runbook.md`
-5. this file
+2. `docs/acceptance-audit.md`
+3. `docs/architecture.md`
+4. `docs/threat-model.md`
+5. `docs/operations-runbook.md`
+6. this file
 
 Then run:
 
 ```bash
 npm ci
 npm run lint
+npm run eval:assessment
 npm test
+npm run audit:production
+npx drizzle-kit check
 git status --short
 ```
 
-## Product goal
+Required baseline:
 
-Build an invite-only production SaaS in which:
+- version `0.3.0-alpha.1`
+- 42 unit/integration tests
+- 4 rendered-production-bundle tests
+- 24 purpose-built assessment repositories
+- 38/38 expected candidates
+- 100% assessment recall, precision, and status accuracy
+- clean lint/typecheck/build/schema validation
+- zero production dependency advisories
 
-1. A provider creates and approves a versioned migration campaign.
-2. A customer accepts an invitation and disclosure.
-3. The customer installs a read-only Scanner GitHub App.
-4. The service assesses a selected private repository.
-5. The customer installs the Patcher App only after seeing impact.
-6. The customer explicitly consents before external-model processing.
-7. The service generates and validates a patch in isolated environments.
-8. The customer reviews the exact diff and evidence.
-9. A customer approver approves the immutable patch hash.
-10. The service opens a real draft PR and never merges it.
-11. A merge triggers a verification scan.
-12. Retention automation deletes source-derived material on schedule.
+If the baseline differs, investigate before changing code. Never lower an
+evaluation threshold or remove a difficult fixture to make a gate pass.
 
-Initial wedge: provider-sponsored Node.js/TypeScript SDK migrations on
-GitHub.com with npm, pnpm, and Yarn lockfiles/workspaces.
+## Current verified state
 
-Reference campaign: Stripe Node SDK `20.3.x → 22.1.x`, including the
-`2026-03-25.dahlia` API transition. It is an **Independent reference
-campaign**. Never imply Stripe endorsement, use a sponsorship badge, or use
-Stripe branding.
+The repository now includes:
 
-## Non-negotiable release boundary
+- tenant-scoped provider, customer, and internal organization shells
+- provider artifact intake for Markdown, HTML URL, PDF, JSON/YAML, SDK diff,
+  and OpenAPI with SSRF/parser limits, encryption, and immutable hashes
+- provider-declarative `MigrationSpecV1` authoring with evidence, limitations,
+  review submission, exact-hash approval, revision pinning, and lifecycle
+  controls
+- provider DNS ownership verification and separate internal branding approval
+- independent Stripe Node `20.3.x -> 22.1.x` reference campaign
+- Scanner/Patcher GitHub App boundaries and verified webhooks
+- spec-driven npm/pnpm/Yarn/workspace dependency resolution
+- TypeScript/ts-morph symbol-aware analysis for ESM, CommonJS, aliases,
+  import-equals, re-exports, calls, members, arguments, and types
+- a production E2B assessment adapter that uses a no-network TypeScript
+  indexer, receives no credentials, never executes repository code, and kills
+  the sandbox in `finally`
+- optional OpenAI classification only after a signed, current consent recheck
+- encrypted assessment manifests recording spec/base/analyzer/sandbox/model
+  versions, offline policy, scope, cost tokens, and cleanup
+- deterministic and bounded template patching, separate dependency preparation
+  and offline validation sandboxes, exact-hash approval, idempotent draft-PR
+  publication, merge verification, retention/export/erasure, and privacy-safe
+  provider status
+- real redacted internal provider/run/deletion/audit summaries
 
-- Real provider artifacts, GitHub installations, repositories, workflows,
-  sandboxes, checks, branches, and draft PRs
-- No mocks, placeholder counts, seeded results, or demo persona switching
-- No autonomous merge or production deployment access
-- GitHub.com only
-- Public npm dependency automation only
-- Private registries, required production secrets, external services, and
-  unsupported installers produce `validation incomplete`
-- Manual contracts/invoicing; no billing UI
-- No arbitrary provider executable code
-- Provider sees only customer-consented lifecycle state
-- Customer approves the exact patch hash immediately before publication
+The deployed environment still lacks external credentials. Code and local
+integration tests are not proof of a real GitHub, Trigger.dev, E2B, OpenAI,
+Resend, DNS, PR, merge, or deletion run. Preserve that distinction.
 
-## Current implementation
+## Workstream 1: complete internal operations
 
-Version: `0.1.0-alpha.1`.
+Extend the existing persisted-data operations surface. Do not expose source or
+repository-derived details.
 
-Private production URL:
-`https://api-migration-autopilot.young-corgi-3741.chatgpt.site`
+Required:
 
-Sites project ID is persisted in `.openai/hosting.json`. Access is currently
-owner-only (`custom` policy, one allowed account, no groups). `APP_BASE_URL` is
-configured in the hosted environment. Do not make the site public as part of
-normal implementation work.
+- provider verification queue with verified-domain evidence, branding
+  approval, actor, and audit history
+- redacted run-health list with run kind/state/failure category, integration
+  stage, elapsed time, retry eligibility, and immutable run ID
+- deletion queue with lifecycle state, deadline, attempt count, last
+  redacted error code, dead-letter state, and verified deletion timestamp
+- model/sandbox/email/workflow cost and usage aggregates without source,
+  filenames, repository identity, exact provider-visible usage, or raw logs
+- canonical audit-chain verification status and a command to verify one
+  organization/run
+- audited safe-retry commands with compare-and-set state guards and idempotency
+  keys; never permit an operator to skip an approval, edit a hash/base SHA, or
+  force publication
+- clear infrastructure/code/permission/stale-base distinctions
 
-The first real production slice is implemented:
+Provider and run rows may use opaque IDs internally. Provider-facing APIs must
+continue returning only customer-consented lifecycle state.
 
-### Control plane and identity
+## Workstream 2: customer-granted support access
 
-- Sites/vinext application with separate provider, customer, and operations
-  shells
-- Sign in with ChatGPT identity through `app/chatgpt-auth.ts`
-- Development identity allowed only outside production
-- Persisted organizations, memberships, and organization-scoped roles
-- Same-origin enforcement for browser writes
-- No surface/persona query switcher
+The schema has `support_grants`; finish the production workflow:
 
-Important files:
+- customer admin/approver chooses the support purpose, exact run/migration
+  scope, and expiry
+- maximum grant duration is bounded (recommended 24 hours)
+- grant/revoke/read/use are audit events
+- support has no source access by default
+- each source-bearing read requires an active exact-scope grant and records the
+  support actor, purpose, object, and timestamp
+- expired/revoked grants fail closed immediately
+- no bulk repository browsing or cross-run grant reuse
+- the customer can see active and historical grants
 
-- `app/page.tsx`
-- `app/components/*`
-- `lib/auth/actor.ts`
-- `lib/domain/tenant.ts`
-- `lib/data/control-plane.ts`
+Add direct cross-tenant, expired, revoked, wrong-scope, and role tests.
 
-### Storage and domain
+## Workstream 3: metadata-only observability
 
-- D1 and R2 bindings in `.openai/hosting.json`
-- 21-table Drizzle schema in `db/schema.ts`
-- generated migration in `drizzle/0000_sleepy_landau.sql`
-- idempotent runtime migration bootstrap in `db/runtime.ts`
-- campaign/repository/run state models
-- strict `MigrationSpecV1` and `RunManifestV1` parsers
-- canonical SHA-256 audit chain
+Add OpenTelemetry and Sentry. Add PostHog only if its production credentials
+and data controls are available; otherwise leave a fail-closed adapter and an
+acceptance item.
 
-Do not edit the existing applied migration. Add a new migration for schema
-changes.
+Centralize telemetry through one redacting boundary. The boundary must reject
+or replace:
 
-### Provider workflow
+- source or snippets
+- repository owner/name/ID
+- filenames and paths
+- findings, diffs, validation logs, and command output
+- tokens, private keys, authorization/cookie headers
+- signed URLs, raw webhook bodies, and model payloads/responses
+- exact customer usage counts in provider context
+- email addresses unless irreversibly keyed for an explicitly approved metric
 
-- Create draft campaigns
-- Acquire/hash/store public Stripe evidence
-- Create the Stripe independent reference spec
-- Approve the exact spec hash
-- Launch an approved campaign
-- Send a real Resend invitation
-- Accept as exact authenticated recipient with explicit lifecycle-sharing
-  consent
-- Persist privacy-safe provider funnel events
+Required metadata:
 
-Important files:
+- request/route class, status, latency, organization kind, and coarse error code
+- workflow task/stage, attempt, duration, terminal category, and opaque run ID
+- sandbox phase/duration/destroyed flag and model name/token/cost totals
+- deletion deadline/attempt/outcome
 
-- `lib/data/specs.ts`
-- `lib/migration/specs/stripe-v20-v22.ts`
-- `lib/data/invitations.ts`
-- `lib/integrations/email.ts`
-- `app/api/campaigns/**`
-- `app/api/reference-campaigns/stripe/route.ts`
-- `app/api/invitations/**`
-- `app/invite/[token]/page.tsx`
+Add table-driven redaction tests containing GitHub tokens, PEM keys, emails,
+URLs, paths, snippets, diffs, and webhook payloads. A telemetry call containing
+forbidden keys must fail a test.
 
-### GitHub boundary
+Configure alerts for webhook authentication failures, workflow terminal
+failure rate, sandbox cleanup failure, deletion deadline risk, dead-letter
+jobs, cross-tenant refusal spikes, and draft-PR publication errors.
 
-- Separate Scanner/Patcher App configuration and setup paths
-- HMAC-authenticated setup state
-- installation ownership verification through GitHub
-- repository-scoped just-in-time installation tokens
-- selected-repository persistence
-- bounded Git tree/blob reads
-- raw-body webhook HMAC verification and delivery deduplication
-- installation lifecycle and PR merge/close handling
-- draft-PR publisher primitive with base-SHA/hash checks, deterministic branch,
-  no force-push, and existing PR detection
+## Workstream 4: patch-review loading and accessibility
 
-Important files:
+The current patch review is real but server-rendered. Implement lazy per-file
+Monaco Diff Editor loading without placing all patch files in the initial page
+payload.
 
-- `lib/integrations/github.ts`
-- `lib/integrations/github-webhook.ts`
-- `lib/security/state.ts`
-- `lib/security/webhooks.ts`
-- `lib/data/github.ts`
-- `app/api/github/**`
-- `app/api/webhooks/github/**`
+Required:
 
-### Assessment slice
+- customer-authenticated, tenant-scoped route for one approved changed file
+- validate migration/run/file path and artifact lifecycle on every request
+- decrypt only the selected file, set `Cache-Control: no-store`, and never send
+  source to telemetry
+- load Monaco client-side only when the diff enters the viewport or a file is
+  selected
+- preserve a semantic, keyboard-readable text diff fallback
+- keep rule IDs, recorded transformation type, confidence/classification,
+  provider source locator, rationale, limitations, validation, and unresolved
+  risk in the evidence rail
+- loading, expired-artifact, integrity-blocked, and permission states must be
+  distinct
 
-- Customer selects an accepted invitation and Scanner repository
-- control plane records the live default-branch SHA
-- D1 run/repository-migration records are persisted
-- Trigger.dev dispatch uses opaque run ID plus control-plane URL
-- signed work-packet/result/failure endpoints
-- Trigger task reads a bounded source set through the trusted GitHub gateway
-- deterministic Stripe assessment
-- strict result/path/evidence/count validation
-- source excerpts discarded at the control-plane boundary
-- persisted customer-only impact report and findings
-- provider lifecycle state updated only when the customer consented
-- infrastructure failures are separately classified and retryable
-- task/result retry is idempotent
+Run an accessibility pass:
 
-Important files:
+- WCAG 2.2 AA contrast
+- full keyboard operation and visible focus
+- status conveyed with text/icons as well as color
+- correct headings, labels, landmarks, live regions, and error association
+- tablet responsiveness and horizontal diff behavior
+- reduced-motion support
 
-- `lib/data/assessments.ts`
-- `lib/data/customer.ts`
-- `lib/migration/analyzer.ts`
-- `lib/migration/assessment-validation.ts`
-- `lib/security/internal.ts`
-- `lib/workflows/engine.ts`
-- `trigger/assessment.ts`
-- `trigger.config.ts`
-- `app/api/assessments/route.ts`
-- `app/api/internal/runs/[id]/**`
+Do not turn the evidence-first interface into a chat-first interface.
 
-### Implemented but not wired end-to-end
+## Workstream 5: failure and abuse hardening
 
-- deterministic Stripe transformer: `lib/migration/transformer.ts`
-- patch/path/base/hash/syntax guards: `lib/migration/patch-security.ts`
-- OpenAI Responses adapter with structured output and independent post-
-  validation: `lib/integrations/model.ts`
-- E2B secure execution adapter: `lib/integrations/sandbox.ts`
-- artifact store boundary: `lib/platform/artifacts.ts`
-- provider-neutral interfaces: GitHub gateway, sandbox runner, model gateway,
-  artifact store, workflow engine
+Add or complete tests for:
 
-### Tests
+- every authenticated route's cross-tenant and role boundary
+- GitHub webhook replay, duplicate semantic events, revoked installations,
+  stale base SHA, branch conflict, existing PR, and permission loss
+- Trigger retry/idempotency and duplicate signed result callbacks
+- OpenAI malformed structured output, refusal, rate limit, outage, and consent
+  revoked immediately before egress
+- E2B IPv4/IPv6 exfiltration, timeout, fork/process exhaustion, excessive
+  output, cleanup failure, and no-secret environment
+- malicious lifecycle scripts and unsupported/private dependencies
+- prompt injection in source comments/docs
+- traversal, symlink/binary/workflow-file attempts and oversized archives
+- retention interruption and deletion deadline enforcement
+- provider privacy after every new operations/telemetry query
 
-- state-transition safety
-- audit-chain mutation detection
-- Stripe lockfile resolution and deterministic codemod
-- workflow/traversal patch refusal
-- GitHub webhook authentication
-- assessment boundary validation/source-excerpt removal
-- production bundle and route/binding assertions
+Infrastructure failure must never be displayed as code failure or no impact.
+No-impact must continue listing exact scanned and skipped customer-only scope.
 
-Current baseline must remain:
+## Workstream 6: live external-account acceptance
+
+Only perform this work with accounts and credentials explicitly placed in
+scope. Never commit them.
+
+Configure and verify:
+
+- Scanner GitHub App
+- Patcher GitHub App
+- Trigger.dev project/tasks/schedule
+- E2B immutable assessment/validation image and registry CIDRs
+- Resend owned sending domain
+- OpenAI production project
+- artifact encryption key
+- provider DNS domain
+
+Use an owned private GitHub repository and complete without database edits or
+operator shell commands:
+
+1. Create and approve a provider campaign.
+2. Invite and accept a customer with sharing disclosure.
+3. Install Scanner on the selected private repository.
+4. Run assessment and verify exact scanned/skipped scope.
+5. Install Patcher and grant model consent only if required.
+6. Generate and validate a real patch in isolated environments.
+7. Review exact diff/evidence and approve the immutable hash.
+8. Open a real draft PR.
+9. Merge it manually.
+10. Receive the merge webhook and pass verification scan.
+11. Revoke consent if granted.
+12. Run retention/early erasure and prove source-object deletion.
+
+Capture metadata-only evidence: run IDs, timestamps, state transitions, hashes,
+PR URL, audit roots, cleanup timestamps, and deletion verification. Do not
+copy source/logs into acceptance documents.
+
+If credentials are absent, do not fabricate or bypass this sequence. Update
+`docs/acceptance-audit.md` with the exact blocker.
+
+## Release gates
+
+- 100% deterministic golden detection/transformation cases
+- at least 90% affected-usage recall across the full corpus
+- at least 85% edit precision with zero unrelated-file changes
+- at least 70% of supported patch fixtures pass declared checks
+- zero cross-tenant exposure, unauthorized/default-branch writes,
+  workflow-file edits, or sandbox credential access
+- source cleanup within 24 hours after interrupted workflows
+- all UI statuses/counts derived from persisted events
+- accessibility checks pass
+- production dependency audit has zero advisories
+- real owned-private-repository sequence above is complete
+
+## Completion rule
+
+Before claiming Phase 6 complete, run:
 
 ```bash
-npm run typecheck
 npm run lint
+npm run eval:assessment
 npm test
+npm run audit:production
+npx drizzle-kit check
+git diff --check
 ```
 
-`tests/control-plane.test.ts` runs the real data layer against SQLite plus an
-in-memory object store through the hooks in `tests/support/runtime.ts`. Extend
-that suite rather than mocking the data layer.
-
-## Honest current limitations
-
-Do not obscure these in product copy or status updates.
-
-Closed since the previous revision (Phases 3-5 spine):
-
-- Model consent is a persisted, versioned grant/revoke command bound to an
-  approver membership, re-checked at a signed gate immediately before any
-  snippet leaves the control plane.
-- A durable `patch-run` workflow exists end to end: acquire source at the
-  recorded commit, deterministic codemod inside customer-authorized paths,
-  optional constrained model residuals, syntax proof, integrity validation,
-  sandbox validation, strict `RunManifestV1` persistence, and cleanup recording.
-- The control plane independently re-validates every patch and refuses to
-  persist one that fails allowed-path, workflow-file, binary, size, base-commit,
-  or hash checks.
-- Patch review renders a real diff, evidence, validation results, integrity
-  issues, and the exact canonical patch SHA-256.
-- Exact-hash approval and idempotent draft-PR publication are implemented, with
-  a default-branch recheck immediately before the write.
-- Post-merge verification scans run at the merged commit; `merged` and
-  `verified` are distinct persisted states.
-- Retention automation is implemented: 24-hour interrupted-run sweeper, 30-day
-  artifact expiry, storage-verified deletion, backoff retry, dead-letter state,
-  and a customer erasure command.
-- A SQLite-backed integration suite proves cross-tenant refusal, role
-  enforcement, consent gating, unauthorized-path refusal, exact-hash approval,
-  publication preconditions, provider privacy, and deletion.
-
-Still open:
-
-1. Trigger task source exists but cannot be deployed without a real Trigger.dev
-   project and credentials. `patch-run` and `retention-sweep` have never
-   executed against a real Trigger.dev project.
-2. The assessment analyzer runs in the Trigger worker after bounded GitHub
-   reads. It does not execute repository code and does not persist source, but
-   the target architecture requires moving analysis into a no-network E2B
-   analyzer sandbox.
-3. The analyzer is deterministic/pattern-aware, not yet TypeScript compiler +
-   ts-morph symbol-aware across aliases and workspaces.
-4. Provider upload and general assisted spec-authoring UI are not implemented;
-   the live reference path is the built-in Stripe evidence pipeline.
-5. Syntax proof comes from the TypeScript parser inside the Trigger worker, not
-   from a sandbox. The parser never executes repository code, but this is a
-   deviation from the "sandbox-backed syntax validation" target.
-6. Sandbox validation runs dependency installation and the declared package
-   scripts in a **single registry-only** sandbox, because carrying prepared
-   dependencies into a second offline sandbox needs a snapshot mechanism that is
-   not implemented. Manifests record `registry_only`, never `none`, whenever a
-   sandbox actually ran. The fully offline validation stage remains open.
-7. Every E2B and OpenAI path is unexercised: no credentials are installed, so
-   validation currently reports `incomplete` and model residuals are skipped.
-8. Patch review is server-rendered with a purpose-built diff. Monaco and lazy
-   per-file artifact fetching are not implemented; the whole patch artifact is
-   decrypted to build the review.
-9. Internal operations screens are not backed by complete diagnostics/retry
-   commands.
-10. Sentry, OpenTelemetry, and metadata-only PostHog are not integrated.
-11. WorkOS is readiness-only. The hosted app uses platform identity plus
-    persisted memberships.
-12. Storage is D1/R2 rather than Neon/S3 because the active Sites runtime
-    provides those primitives.
-13. `GET /api/runs/:id` returns persisted stage events for polling. No real-time
-    subscription is implemented.
-14. No 20-fixture evaluation corpus exists yet, so none of the recall,
-    precision, or fixture-pass release gates have been measured.
-15. No end-to-end run has been executed against a real GitHub App, repository,
-    sandbox, or pull request. Nothing in Phase 0's exit gate is verified.
-
-## Ordered implementation plan
-
-Complete phases in order. Do not start broad UI polish while integrity,
-tenancy, workflow, and deletion semantics remain incomplete.
-
-### Phase 0 — Reproduce and configure the first slice
-
-1. Create real Scanner and Patcher GitHub Apps with only documented
-   permissions.
-2. Create Trigger.dev project; set `TRIGGER_PROJECT_REF`,
-   `TRIGGER_SECRET_KEY`, and `WORKFLOW_CALLBACK_SECRET`.
-3. Run `npm run trigger:deploy` and confirm `assessment-run` is indexed.
-4. Configure Resend and an owned sending domain.
-5. Run provider → invitation → private owned repo → persisted assessment.
-6. Add route integration tests for cross-tenant IDs, invalid role, invalid
-   invitation/repository combinations, duplicate dispatch, callback replay,
-   revoked installation, and failure recovery.
-
-Exit gate: a new organization completes the assessment flow without DB edits or
-operator shell commands.
-
-### Phase 1 — General provider artifact/spec authoring
-
-Implement:
-
-- artifact uploads for Markdown, PDF, JSON/YAML, SDK diff, OpenAPI
-- safe HTML URL acquisition with SSRF protection, DNS/IP validation, size/time/
-  redirect/media limits
-- R2 artifact records and immutable SHA-256 references
-- PDF/HTML/Markdown extraction
-- operator-assisted rule authoring
-- versioned draft → internal authoring → provider review → approved flow
-- evidence/limitations/examples/validation review UI
-- spec revision, pause, archive; existing runs stay pinned
-- verified provider-domain/branding approval workflow
-
-OpenAPI may be stored/extracted; automatic transformation generation is not a
-v1 requirement. Provider artifacts cannot contain executable code.
-
-Exit gate: a provider can create and approve a new campaign without a built-in
-code path or DB edits.
-
-### Phase 2 — Production assessment engine
-
-Replace/extend the current analyzer with:
-
-- exact npm/pnpm/Yarn workspace and lockfile resolution
-- TypeScript compiler program construction
-- ts-morph symbol-aware imports, calls, arguments, return values, re-exports,
-  aliases, CommonJS/ESM, and workspace boundaries
-- ripgrep candidate generation before AST analysis
-- deterministic detectors first
-- model classification only for unresolved candidates after consent
-- explicit no-impact report listing scanned and unscanned scope
-- persisted stage events and polling endpoint; real-time subscription optional
-- no-network E2B analyzer sandbox, no repository code execution
-
-Do not delete the existing golden Stripe fixtures; extend them.
-
-Exit gate: deterministic golden cases are 100%; affected-usage recall is at
-least 90% across a 20+ repository fixture corpus.
-
-### Phase 3 — Consent and durable patch workflow
-
-Add versioned model-consent grant/revoke commands:
-
-- show exact data categories, vendor, model purpose, retention disclosure
-- require approver/admin
-- bind consent version and actor to the repository migration/run
-- stop before any snippet leaves the control plane when absent/revoked
-
-Build Trigger workflow stages:
-
-1. acquire source at recorded SHA
-2. deterministic codemod
-3. parameterized templates
-4. constrained model residuals
-5. validate output paths/ranges/hashes/binaries/workflows/size/syntax/unrelated
-   changes
-6. dependency preparation in a registry-only E2B sandbox, manifests/lockfiles
-   only, lifecycle scripts disabled
-7. offline validation sandbox with prepared dependencies, no secrets/network
-8. store encrypted patch/log artifacts
-9. persist findings, edits, validation evidence, cost, and `RunManifestV1`
-10. hash-chain audit events
-11. destroy sandbox/archive immediately and record cleanup result
-
-Validation commands are customer-confirmed from package scripts: install, lint,
-type-check, build, test. No arbitrary shell.
-
-Exit gate: at least 85% edit precision, zero unrelated files, and at least 70%
-of supported fixtures pass declared checks.
-
-### Phase 4 — Patch review, approval, and draft PR
-
-Implement customer-only:
-
-- file tree
-- lazy-loaded Monaco diff
-- evidence rail with rule ID, provider citation, rationale, confidence,
-  transformation type, validation, and unresolved risk
-- validation logs with code vs infrastructure failure distinction
-- rollback instructions
-- exact canonical patch SHA-256 display
-
-Approval:
-
-- approver/admin only
-- accept `{runId, patchHash, intent: open-draft-pr}`
-- re-read current persisted patch, recompute hash, record actor/time
-- no PR when integrity/path/syntax/base-SHA validation failed
-- allow warned draft PR for test failure/incomplete only
-
-Publication:
-
-- require active Patcher installation for that repository
-- recheck default SHA and approval hash immediately before write
-- use existing `GitHubAppGateway.publishDraftPullRequest`
-- persist PR identity in finalized manifest
-- update customer state and consented provider lifecycle
-- retry idempotently; no force push
-
-Exit gate: a real customer-approved patch opens a real draft PR in an owned
-private repository.
-
-### Phase 5 — Merge verification and retention
-
-- verify PR webhook identity and merge SHA
-- enqueue a fresh Scanner verification at the merged commit
-- distinguish merged from verified
-- durable deletion queue
-- immediate source/sandbox deletion
-- 24-hour interrupted-run hard-TTL sweeper
-- 30-day snippets/diffs/logs expiry
-- 12-month audit/manifest retention, with earlier customer erasure
-- R2 deletion verification and retry/backoff/dead-letter state
-- customer deletion request and export
-- artifact-expiry UI and audit events
-
-Exit gate: merged PR verifies and all source-derived artifacts prove deletion
-within policy, including interrupted runs.
-
-### Phase 6 — Operations, observability, and release hardening
-
-Operations:
-
-- provider verification
-- redacted run health
-- audited safe retry
-- deletion queue
-- cost/run and model/sandbox usage
-- audit verification
-- time-limited customer-granted support access
-- no default source access
-
-Telemetry:
-
-- OpenTelemetry
-- Sentry
-- metadata-only PostHog
-- centralized redaction tests
-- never emit source, filename, diff, log, token, signed URL, raw webhook, or
-  customer exact usage count
-
-Hardening:
-
-- cross-tenant route suite
-- webhook replay
-- Trigger retry/idempotency
-- model malformed/refusal/rate-limit/outage
-- E2B outage/timeout/exfiltration/fork bomb/output exhaustion
-- malicious package scripts
-- prompt injection
-- stale SHA, branch conflict, duplicate PR
-- private dependency and missing scripts
-- accessibility: WCAG 2.2 AA, keyboard, focus, semantic status
-- tablet responsiveness and performance
-- incident/deletion runbooks
-- penetration review
-
-Exit gate: every release gate below passes and the production walkthrough uses
-real accounts and a real private repository.
-
-## Required release gates
-
-- 100% deterministic golden detection/transformation success
-- ≥90% affected-usage recall across the complete evaluation corpus
-- ≥85% edit precision and zero unrelated-file changes
-- ≥70% of supported fixtures pass declared checks
-- zero cross-tenant data exposure
-- zero unauthorized/default-branch writes
-- zero workflow-file edits
-- zero sandbox credential access
-- source cleanup within 24 hours after interrupted workflows
-- every customer-visible status/count derived from persisted events
-- real provider campaign, invitation, private repo, sandbox result, exact-hash
-  approval, real draft PR, merge, verification scan, and deletion proof
-
-## Interfaces and invariants to preserve
-
-Provider-neutral boundaries:
-
-- `GitHubGateway`
-- `SandboxRunner`
-- `ModelGateway`
-- `ArtifactStore`
-- `WorkflowEngine`
-
-Migration specification invariants:
-
-- immutable source artifact hashes
-- versioned revision
-- approved hash and approver
-- detector/transformation config, citations, invariants, limitations
-- no executable provider code
-
-Run manifest invariants:
-
-- tenant/repository/campaign/spec revision/base SHA
-- detector/transformer/prompt/model/sandbox versions
-- findings and allowed paths
-- patch SHA-256
-- commands/results and network/resource policy
-- approval actor/time
-- PR identity
-- cost/timestamps/cleanup
-- finalized encrypted artifact and audit-chain event
-
-Privacy invariant: never return repository names, paths, source, findings,
-diffs, logs, or exact counts from a provider query. Test this explicitly.
-
-Publication invariant: no PR unless patch integrity, allowed paths, syntax, and
-base SHA pass. Test failure/incomplete may allow only a prominently warned
-draft PR after authorized exact-hash approval.
-
-## Current route inventory
-
-Browser/authenticated:
-
-- `POST /api/bootstrap`
-- `POST /api/consents`
-- `POST /api/patches`
-- `POST /api/patches/approve`
-- `POST /api/patches/publish`
-- `GET /api/runs/:id`
-- `GET|POST /api/campaigns`
-- `POST /api/campaigns/approve`
-- `POST /api/campaigns/launch`
-- `POST /api/reference-campaigns/stripe`
-- `GET|POST /api/invitations`
-- `POST /api/invitations/accept`
-- `POST /api/github/:kind/install`
-- `GET /api/github/:kind/setup`
-- `POST /api/assessments`
-- `GET /api/integrations`
-- `GET /api/health`
-
-Verified machine ingress:
-
-- `POST /api/webhooks/github/scanner`
-- `POST /api/webhooks/github/patcher`
-- `GET /api/internal/runs/:id/work-packet`
-- `POST /api/internal/runs/:id/assessment-result`
-- `POST /api/internal/runs/:id/failure`
-- `GET /api/internal/runs/:id/patch-packet`
-- `POST /api/internal/runs/:id/patch-result`
-- `POST /api/internal/runs/:id/model-consent`
-- `POST /api/internal/retention/sweep`
-
-Do not add a public API or CLI in v1.
-
-## Environment inventory
-
-Core:
-
-- `APP_BASE_URL`
-- `INTERNAL_OPERATOR_EMAILS`
-
-Local development only:
-
-- `ALLOW_DEV_AUTH`
-- `DEV_USER_EMAIL`
-- `DEV_USER_NAME`
-
-GitHub:
-
-- `GITHUB_SCANNER_APP_ID`
-- `GITHUB_SCANNER_PRIVATE_KEY`
-- `GITHUB_SCANNER_WEBHOOK_SECRET`
-- `GITHUB_SCANNER_SLUG`
-- `GITHUB_PATCHER_APP_ID`
-- `GITHUB_PATCHER_PRIVATE_KEY`
-- `GITHUB_PATCHER_WEBHOOK_SECRET`
-- `GITHUB_PATCHER_SLUG`
-- `GITHUB_SETUP_STATE_SECRET`
-
-Trigger:
-
-- `TRIGGER_SECRET_KEY`
-- `TRIGGER_API_URL`
-- `TRIGGER_PROJECT_REF`
-- `WORKFLOW_CALLBACK_SECRET`
-
-Email:
-
-- `RESEND_API_KEY`
-- `EMAIL_FROM`
-
-OpenAI:
-
-- `OPENAI_API_KEY`
-- `OPENAI_SPEC_MODEL` (default `gpt-5.6-terra`)
-- `OPENAI_PATCH_MODEL` (default `gpt-5.6-sol`)
-
-E2B:
-
-- `E2B_API_KEY`
-- `E2B_TEMPLATE_ID`
-- `E2B_REGISTRY_CIDRS`
-
-Artifact encryption (required before any patch, log, or manifest is stored):
-
-- `ARTIFACT_ENCRYPTION_KEY` (32 bytes, base64 or hex)
-
-Optional future WorkOS bridge:
-
-- `WORKOS_API_KEY`
-- `WORKOS_CLIENT_ID`
-- `WORKOS_WEBHOOK_SECRET`
-
-Use separate values per environment. Never log or commit them.
-
-## Final instruction
-
-Work milestone by milestone and keep the app deployable after each one. Add
-tests before claiming a security or privacy invariant. Preserve fail-closed
-empty states for unfinished integrations. The final product is complete only
-after the real end-to-end acceptance sequence and all deletion evidence pass;
-a polished screen without the underlying persisted workflow does not count.
+Update `README.md`, architecture/threat/runbook documentation, and
+`docs/acceptance-audit.md` with exact measured and live-account results.
+
+Do not call the overall MVP complete until the live sequence succeeds with
+real accounts and deletion proof. If it succeeds, replace this file with an
+incident-ready beta handoff covering partner onboarding, penetration-review
+findings, reliability objectives, and the first design-partner campaign.

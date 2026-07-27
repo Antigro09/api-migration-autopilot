@@ -15,6 +15,12 @@ an unconfigured external service is visibly unavailable.
 - Sign in with ChatGPT identity and persisted, organization-scoped roles
 - Separate provider, customer, and internal-operations application shells
 - Provider campaign creation and immutable specification approval/launch
+- General provider artifact intake for Markdown, HTML, PDF, JSON/YAML, SDK
+  diffs, and OpenAPI; raw and extracted evidence are encrypted and hashed
+- Provider-declarative rule authoring with evidence, limitations, before/after
+  examples, review submission, exact-hash approval, safe revision, pause, and
+  archive controls
+- Provider-owned domain verification through an expiring DNS TXT challenge
 - Independent Stripe Node `20.3.x → 22.1.x` reference campaign backed by
   fetched, hashed public evidence
 - Real email invitations through Resend, with exact-recipient acceptance and
@@ -23,9 +29,12 @@ an unconfigured external service is visibly unavailable.
 - GitHub installation ownership verification, just-in-time repository-scoped
   tokens, webhook authentication, and delivery deduplication
 - Durable assessment task source for Trigger.dev
-- Real bounded repository reads, Stripe dependency resolution, deterministic
-  findings, source-minimized signed callbacks, and persisted customer-only
-  impact reports
+- Spec-driven Node.js/TypeScript assessment for approved provider rules,
+  including npm, pnpm, Yarn Classic/Berry, lockfiles, and workspaces
+- TypeScript/ts-morph symbol indexing in a no-network E2B analyzer that never
+  executes repository code, plus optional consent-gated model classification
+- Source-minimized signed callbacks, exact provider evidence, encrypted
+  assessment manifests, and customer-only scanned/skipped scope
 - Deterministic Stripe codemods, patch hashing/security checks, constrained
   OpenAI and E2B adapters, and idempotent draft-PR publication primitives
 - D1 persistence, R2 encrypted-artifact boundary, tenant filters, and
@@ -44,11 +53,12 @@ an unconfigured external service is visibly unavailable.
   publication that rechecks the default-branch commit immediately before writing
 - Post-merge verification scans that keep `merged` and `verified` distinct
 - Retention automation: a 24-hour interrupted-run sweeper, 30-day artifact
-  expiry, storage-verified deletion, retry with backoff, and a dead-letter state
+  expiry, storage-verified deletion, retry with backoff, a dead-letter state,
+  customer export, and customer-requested early erasure
 
-Provider onboarding beyond the built-in reference campaign, ts-morph
-symbol-aware analysis, and the operations/telemetry surfaces are the next
-implementation phases. See [CLAUDE_HANDOFF.md](./CLAUDE_HANDOFF.md).
+The next implementation phase is operations, observability, release hardening,
+lazy Monaco patch loading, and live external-account acceptance. See
+[CLAUDE_HANDOFF.md](./CLAUDE_HANDOFF.md).
 
 ## Architecture
 
@@ -78,10 +88,11 @@ security analysis is in [docs/threat-model.md](./docs/threat-model.md).
 
 `npm test` runs type checking, the unit and integration suites, a production
 build, and assertions against the built worker bundle. The integration suite in
-`tests/control-plane.test.ts` runs the real data layer against SQLite and an
-in-memory object store, and covers cross-tenant refusal, role enforcement,
+`tests/control-plane.test.ts` and `tests/provider-authoring.test.ts` run the real
+data layer against SQLite and an in-memory object store. They cover cross-tenant
+refusal, role enforcement, provider evidence encryption, SSRF controls,
 consent gating, unauthorized-path and workflow-file refusal, exact-hash
-approval, publication preconditions, provider privacy, and deletion proof.
+approval, finalized PR identity, provider privacy, and deletion proof.
 
 ## Local setup
 
@@ -120,6 +131,7 @@ execution and `npm run trigger:deploy` to publish the production task version.
 npm run typecheck
 npm run lint
 npm run test:unit
+npm run eval:assessment
 npm test
 npm run audit:production
 ```
@@ -129,10 +141,9 @@ production bundle, and compiled-route assertions.
 
 ## Database
 
-The Drizzle schema is in `db/schema.ts`; the generated migration is in
-`drizzle/0000_sleepy_landau.sql`. The hosted runtime applies the versioned
-migration idempotently through `db/runtime.ts`. Generate a new migration after
-schema changes:
+The Drizzle schema is in `db/schema.ts`; generated migrations are in
+`drizzle/`. The hosted runtime applies every versioned migration idempotently
+through `db/runtime.ts`. Generate a new migration after schema changes:
 
 ```bash
 npm run db:generate
@@ -148,7 +159,7 @@ setup, failure classification, safe retries, and incident response.
 
 ## Status
 
-Version: `0.1.0-alpha.1`.
+Version: `0.3.0-alpha.1`.
 
 Private hosted control plane:
 [api-migration-autopilot.young-corgi-3741.chatgpt.site](https://api-migration-autopilot.young-corgi-3741.chatgpt.site).
@@ -156,4 +167,5 @@ Access is owner-only until collaborators are explicitly added.
 
 This is a real but incomplete private alpha. External credentials and partner
 accounts are intentionally not committed. The system fails closed when they
-are absent.
+are absent. See [docs/acceptance-audit.md](./docs/acceptance-audit.md) for the
+line between locally verified code and live-account acceptance.

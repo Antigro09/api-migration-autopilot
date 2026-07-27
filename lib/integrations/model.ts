@@ -47,6 +47,8 @@ export type ModelResult<T> = {
   outputTokens: number;
 };
 
+export const MODEL_RESIDUAL_PROMPT_VERSION = "model-residual-edits-v1";
+
 export interface ModelGateway {
   classify(input: {
     candidates: readonly UnresolvedCandidate[];

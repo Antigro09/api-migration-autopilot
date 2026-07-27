@@ -1,3 +1,4 @@
+import type { MigrationSpecV1 } from "../domain/index.js";
 import type { FileEdit, MigrationAssessment, MigrationFinding, RepositoryFile } from "./contracts.js";
 import { createPatchHash } from "./patch-security.js";
 
@@ -225,5 +226,99 @@ export async function createDeterministicStripePatch(input: {
   };
 }
 
-export const stripeTransformerVersion = "stripe-v20-v22-transformer/1.0.0";
+/**
+ * Applies the only provider-authored v1 template recipe. A finding must select
+ * the exact `before` text: provider examples never become an unbounded global
+ * search-and-replace. Overlaps and stale candidate ranges fail closed.
+ */
+export async function createParameterizedTemplatePatch(input: {
+  readonly baseSha: string;
+  readonly files: readonly RepositoryFile[];
+  readonly findings: readonly MigrationFinding[];
+  readonly spec: MigrationSpecV1;
+}): Promise<{
+  readonly files: readonly FileEdit[];
+  readonly patchSha256: string;
+  readonly patchedFindingIds: readonly string[];
+}> {
+  const changes = new Map(
+    input.spec.changes
+      .filter(
+        (change) =>
+          change.autoPatchEligible &&
+          change.transformation.kind === "parameterized_template" &&
+          change.transformation.recipeId === "literal-text-replacement-v1",
+      )
+      .map((change) => [change.id, change] as const),
+  );
+  const findingsByPath = new Map<string, MigrationFinding[]>();
+  for (const finding of input.findings) {
+    if (!changes.has(finding.ruleId) || !finding.autoPatchEligible) continue;
+    const existing = findingsByPath.get(finding.path) ?? [];
+    existing.push(finding);
+    findingsByPath.set(finding.path, existing);
+  }
 
+  const files: FileEdit[] = [];
+  const patchedFindingIds = new Set<string>();
+  for (const file of input.files) {
+    const edits: TextEdit[] = [];
+    for (const finding of findingsByPath.get(file.path) ?? []) {
+      const change = changes.get(finding.ruleId);
+      if (!change) continue;
+      const before = change.transformation.parameters.before;
+      const after = change.transformation.parameters.after;
+      if (typeof before !== "string" || typeof after !== "string") continue;
+      if (
+        before.length === 0 ||
+        before === after ||
+        file.content.slice(
+          finding.location.start,
+          finding.location.end,
+        ) !== before
+      ) {
+        continue;
+      }
+      edits.push({
+        start: finding.location.start,
+        end: finding.location.end,
+        replacement: after,
+        ruleId: finding.ruleId,
+        rationale:
+          typeof change.transformation.parameters.rationale === "string"
+            ? change.transformation.parameters.rationale
+            : change.description,
+      });
+      patchedFindingIds.add(finding.id);
+    }
+    if (edits.length === 0) continue;
+    let newContent: string;
+    try {
+      newContent = applyTextEdits(file.content, edits);
+    } catch {
+      // One stale or overlapping candidate makes the entire file ineligible;
+      // never apply only a surprising subset of provider-authored templates.
+      for (const finding of findingsByPath.get(file.path) ?? []) {
+        patchedFindingIds.delete(finding.id);
+      }
+      continue;
+    }
+    if (newContent === file.content) continue;
+    files.push({
+      path: file.path,
+      originalContent: file.content,
+      newContent,
+      ruleIds: [...new Set(edits.map((edit) => edit.ruleId))],
+      rationale: [...new Set(edits.map((edit) => edit.rationale))],
+    });
+  }
+  return {
+    files,
+    patchSha256: await createPatchHash(input.baseSha, files),
+    patchedFindingIds: [...patchedFindingIds],
+  };
+}
+
+export const stripeTransformerVersion = "stripe-v20-v22-transformer/1.0.0";
+export const parameterizedTemplateTransformerVersion =
+  "literal-text-replacement-v1/1.0.0";

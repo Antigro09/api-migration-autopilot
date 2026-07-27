@@ -1,6 +1,6 @@
 {
   "name": "api-migration-autopilot",
-  "version": "0.1.0-alpha.1",
+  "version": "0.3.0-alpha.1",
   "private": true,
   "engines": {
     "node": ">=24.0.0"
@@ -10,10 +10,11 @@
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run typecheck && npm run test:unit && npm run build && node --test tests/rendered-html.test.mjs",
-    "test:unit": "tsx --test tests/*.test.ts tests/*.test.tsx",
+    "test:unit": "tsx --test --test-concurrency=1 tests/*.test.ts tests/*.test.tsx",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
+    "eval:assessment": "tsx scripts/evaluate-assessment.ts",
     "audit:production": "node scripts/audit-production-deps.mjs",
     "trigger:dev": "trigger dev --skip-update-check",
     "trigger:deploy": "trigger deploy --skip-update-check"
@@ -23,9 +24,14 @@
     "drizzle-orm": "0.45.2",
     "e2b": "^2.14.0",
     "next": "16.2.12",
+    "parse5": "^8.0.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "typescript": "5.9.3"
+    "semver": "^7.8.5",
+    "ts-morph": "^28.0.0",
+    "typescript": "5.9.3",
+    "unpdf": "^1.8.0",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
@@ -35,6 +41,7 @@
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "@types/semver": "^7.7.1",
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
     "drizzle-kit": "0.31.10",

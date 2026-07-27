@@ -153,6 +153,7 @@ export const migrationSpecs = sqliteTable(
       .default("draft"),
     content: text("content", { mode: "json" }).$type<MigrationSpecV1>().notNull(),
     contentSha256: text("content_sha256").notNull(),
+    submittedForReviewAt: text("submitted_for_review_at"),
     approvedByMembershipId: text("approved_by_membership_id").references(
       () => memberships.id,
       { onDelete: "restrict" },
@@ -195,8 +196,24 @@ export const sourceArtifacts = sqliteTable(
     mediaType: text("media_type").notNull(),
     storageKey: text("storage_key").notNull(),
     sha256: text("sha256").notNull(),
+    encryptionKeyId: text("encryption_key_id")
+      .notNull()
+      .default("legacy-public-reference"),
+    extractedStorageKey: text("extracted_storage_key"),
+    extractedSha256: text("extracted_sha256"),
+    extractedEncryptionKeyId: text("extracted_encryption_key_id"),
+    extractionStatus: text("extraction_status")
+      .$type<"pending" | "complete" | "incomplete" | "failed">()
+      .notNull()
+      .default("pending"),
+    extractionMessage: text("extraction_message"),
+    pageCount: integer("page_count"),
     externalUrl: text("external_url"),
     sizeBytes: integer("size_bytes").notNull(),
+    uploadedByMembershipId: text("uploaded_by_membership_id").references(
+      () => memberships.id,
+      { onDelete: "restrict" },
+    ),
     createdAt: text("created_at").notNull().default(currentTimestamp),
   },
   (table) => [
@@ -207,6 +224,41 @@ export const sourceArtifacts = sqliteTable(
     index("source_artifacts_campaign_idx").on(
       table.organizationId,
       table.campaignId,
+    ),
+  ],
+);
+
+export const providerVerificationChallenges = sqliteTable(
+  "provider_verification_challenges",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    domain: text("domain").notNull(),
+    dnsName: text("dns_name").notNull(),
+    verificationValue: text("verification_value").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    status: text("status")
+      .$type<"pending" | "verified" | "expired">()
+      .notNull()
+      .default("pending"),
+    expiresAt: text("expires_at").notNull(),
+    verifiedAt: text("verified_at"),
+    createdByMembershipId: text("created_by_membership_id")
+      .notNull()
+      .references(() => memberships.id, { onDelete: "restrict" }),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    index("provider_verification_org_status_idx").on(
+      table.organizationId,
+      table.status,
+      table.expiresAt,
+    ),
+    uniqueIndex("provider_verification_org_domain_uidx").on(
+      table.organizationId,
+      table.domain,
     ),
   ],
 );

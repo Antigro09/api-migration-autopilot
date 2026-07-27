@@ -54,9 +54,14 @@ export function integrationReadiness(): IntegrationReadiness {
       requiredFor: "model-assisted processing",
     },
     e2b: {
-      configured: allPresent("E2B_API_KEY", "E2B_TEMPLATE_ID"),
+      configured: allPresent(
+        "E2B_API_KEY",
+        "E2B_TEMPLATE_ID",
+        "E2B_ASSESSMENT_IMAGE_VERSION",
+        "E2B_REGISTRY_CIDRS",
+      ),
       purpose: "Run analysis and validation in isolated, resource-limited sandboxes.",
-      requiredFor: "patch validation",
+      requiredFor: "repository assessment and patch validation",
     },
     trigger: {
       configured: allPresent(

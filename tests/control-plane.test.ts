@@ -26,6 +26,7 @@ const { customerPatchReview, customerWorkspaceData, runStatus } = await import(
   "@/lib/data/customer"
 );
 const { providerDashboard } = await import("@/lib/data/control-plane");
+const { completeAssessment } = await import("@/lib/data/assessments");
 const { readRunArtifact, storeRunArtifact } = await import(
   "@/lib/data/artifacts"
 );
@@ -174,6 +175,97 @@ async function expectDomainError(
 
 test.beforeEach(() => {
   resetControlPlane();
+});
+
+test("assessment completion accepts the run-bound spec and persists encrypted execution evidence", async () => {
+  const tenant = await seedTenant();
+  const database = getD1();
+  await database.batch([
+    database
+      .prepare(
+        `DELETE FROM findings
+         WHERE organization_id = ? AND run_id = ?`,
+      )
+      .bind(tenant.customerOrganizationId, tenant.assessmentRunId),
+    database
+      .prepare(
+        `UPDATE migration_runs
+         SET state = 'analyzing', manifest = null, completed_at = null
+         WHERE id = ? AND organization_id = ?`,
+      )
+      .bind(tenant.assessmentRunId, tenant.customerOrganizationId),
+    database
+      .prepare(
+        `UPDATE repository_migrations
+         SET state = 'assessing', assessment_summary = null
+         WHERE id = ? AND organization_id = ?`,
+      )
+      .bind(tenant.repositoryMigrationId, tenant.customerOrganizationId),
+  ]);
+  const destroyedAt = new Date().toISOString();
+  await completeAssessment({
+    runId: tenant.assessmentRunId,
+    assessment: {
+      specId: tenant.specId,
+      specRevision: 1,
+      status: "no-impact",
+      dependency: {
+        packageName: "stripe",
+        declaredRange: "^20.3.0",
+        resolvedVersion: "20.3.0",
+        manifestPath: "package.json",
+        lockfilePath: "package-lock.json",
+        supportedSource: true,
+        targetSatisfied: false,
+        warnings: [],
+      },
+      findings: [],
+      scannedFiles: ["src/billing.ts"],
+      skipped: [],
+    },
+    skipped: [],
+    execution: {
+      analyzerVersion: "spec-driven-analyzer/2.0.0",
+      sandboxId: "sandbox_test",
+      sandboxImageVersion: "node-24-assessment/1",
+      network: "none",
+      sandboxDestroyedAt: destroyedAt,
+      sourceDeletedAt: destroyedAt,
+    },
+  });
+  const run = await database
+    .prepare(
+      `SELECT state, manifest
+       FROM migration_runs
+       WHERE id = ? AND organization_id = ?`,
+    )
+    .bind(tenant.assessmentRunId, tenant.customerOrganizationId)
+    .first<{ state: string; manifest: string }>();
+  assert.equal(run?.state, "cleaned");
+  const manifest = JSON.parse(run?.manifest ?? "{}") as {
+    schemaVersion?: string;
+    migrationSpecId?: string;
+    executionPolicy?: { network?: string; repositoryCodeExecuted?: boolean };
+    artifact?: { id?: string; sha256?: string };
+  };
+  assert.equal(manifest.schemaVersion, "2");
+  assert.equal(manifest.migrationSpecId, tenant.specId);
+  assert.equal(manifest.executionPolicy?.network, "none");
+  assert.equal(manifest.executionPolicy?.repositoryCodeExecuted, false);
+  assert.match(manifest.artifact?.sha256 ?? "", /^[a-f0-9]{64}$/);
+  assert.ok(
+    [...testBucket.objects.keys()].some((key) =>
+      key.endsWith("/assessment-manifest-v2.json.enc"),
+    ),
+  );
+  const workspace = await customerWorkspaceData(
+    tenant.customerOrganizationId,
+    tenant.repositoryMigrationId,
+  );
+  assert.deepEqual(
+    workspace.selectedMigration?.assessmentSummary?.scannedPaths,
+    ["src/billing.ts"],
+  );
 });
 
 test("model consent requires an approver and the currently published disclosure", async () => {
@@ -456,6 +548,40 @@ test("approval binds the exact stored hash and refuses stale or forged hashes", 
   assert.equal(run?.state, "approved");
   assert.equal(run?.approved, result.patchSha256);
   assert.equal(run?.actor, tenant.memberships.approver);
+
+  const manifest = await getD1()
+    .prepare("SELECT manifest FROM migration_runs WHERE id = ?")
+    .bind(runId)
+    .first<{ manifest: string }>();
+  const parsedManifest = JSON.parse(manifest?.manifest ?? "{}") as {
+    approval?: {
+      patchSha256: string;
+      approvedByMembershipId: string;
+      approvedAt: string;
+    };
+  };
+  assert.equal(
+    parsedManifest.approval?.approvedByMembershipId,
+    tenant.memberships.approver,
+  );
+  assert.equal(
+    parsedManifest.approval?.patchSha256,
+    result.patchSha256,
+  );
+  const manifestArtifact = await getD1()
+    .prepare(
+      "SELECT id FROM artifacts WHERE run_id = ? AND kind = 'run_manifest' AND lifecycle_state = 'active'",
+    )
+    .bind(runId)
+    .first<{ id: string }>();
+  assert.ok(manifestArtifact);
+  assert.match(
+    await readRunArtifact({
+      organizationId: tenant.customerOrganizationId,
+      artifactId: manifestArtifact.id,
+    }),
+    /approvedByMembershipId/,
+  );
 });
 
 test("approval after failed validation is allowed but recorded as warned", async () => {
@@ -532,6 +658,85 @@ test("publication refuses without approval, with an inactive Patcher App, or aft
     publishApprovedPatch({ tenant: tenant.tenantFor("approver"), runId }),
     "VALIDATION_FAILED",
   );
+});
+
+test("successful publication finalizes the actual approver and draft PR identity", async () => {
+  const tenant = await seedTenant();
+  const runId = await seedPatchRun(tenant);
+  const result = await buildPatchResult(tenant);
+  await submitPatchResult({ runId, result });
+  await approvePatch({
+    tenant: tenant.tenantFor("approver"),
+    runId,
+    patchHash: result.patchSha256,
+    intent: "open-draft-pr",
+  });
+
+  let publishedBody = "";
+  const publication = await publishApprovedPatch({
+    tenant: tenant.tenantFor("admin"),
+    runId,
+    gateway: {
+      getBranchSha: async () => tenant.baseSha,
+      publishDraftPullRequest: async (input) => {
+        publishedBody = input.body;
+        return {
+          number: 42,
+          url: "https://github.test/customer/repository/pull/42",
+          branch: `migration-autopilot/campaign/${runId}`,
+          headSha: "b".repeat(40),
+          existing: false,
+        };
+      },
+    },
+  });
+  assert.equal(publication.number, 42);
+  assert.match(publishedBody, new RegExp(result.patchSha256));
+  assert.match(publishedBody, /draft/i);
+
+  const persisted = await getD1()
+    .prepare(
+      "SELECT state, manifest FROM migration_runs WHERE id = ? AND organization_id = ?",
+    )
+    .bind(runId, tenant.customerOrganizationId)
+    .first<{ state: string; manifest: string }>();
+  assert.equal(persisted?.state, "pr_open");
+  const manifest = JSON.parse(persisted?.manifest ?? "{}") as {
+    approval?: { approvedByMembershipId: string };
+    pullRequest?: {
+      number: number;
+      url: string;
+      branch: string;
+      draft: boolean;
+    };
+  };
+  assert.equal(
+    manifest.approval?.approvedByMembershipId,
+    tenant.memberships.approver,
+    "publication must preserve the actor who approved, not the later publisher",
+  );
+  assert.deepEqual(manifest.pullRequest, {
+    provider: "github",
+    number: 42,
+    url: "https://github.test/customer/repository/pull/42",
+    branch: `migration-autopilot/campaign/${runId}`,
+    draft: true,
+  });
+
+  const retry = await publishApprovedPatch({
+    tenant: tenant.tenantFor("approver"),
+    runId,
+    gateway: {
+      getBranchSha: async () => {
+        throw new Error("An idempotent retry must not call GitHub.");
+      },
+      publishDraftPullRequest: async () => {
+        throw new Error("An idempotent retry must not write to GitHub.");
+      },
+    },
+  });
+  assert.equal(retry.existing, true);
+  assert.equal(retry.number, 42);
 });
 
 test("provider queries never expose repository-derived detail", async () => {

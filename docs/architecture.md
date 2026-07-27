@@ -21,8 +21,8 @@ The repository is a modular monolith:
 - `lib/data/`: tenant-scoped persistence commands and queries
 - `lib/domain/`: schemas, state machines, manifests, audit-chain logic
 - `lib/integrations/`: GitHub, OpenAI, E2B, and Resend adapters
-- `lib/migration/`: deterministic Stripe analyzer, transformer, and patch
-  security
+- `lib/migration/`: spec-driven TypeScript/ts-morph assessment, installed
+  deterministic rules, transformer, evaluation corpus, and patch security
 - `lib/workflows/`: provider-neutral durable-workflow boundary
 - `trigger/`: Trigger.dev task implementations
 - `db/` and `drizzle/`: D1 schema and migrations
@@ -65,18 +65,26 @@ It uses no Stripe logo, sponsorship badge, or endorsement language.
 4. Select an invitation and repository.
 5. Record the current default-branch SHA through a just-in-time Scanner token.
 6. Persist a run and dispatch an opaque run ID to Trigger.dev.
-7. Trigger.dev obtains a signed work packet, reads a bounded source set through
-   the trusted GitHub gateway, and executes deterministic analysis.
-8. The worker removes excerpts and posts the structured result over a signed
-   callback.
-9. The control plane validates paths, counts, evidence URLs, locations, and
-   engine identity before persisting findings.
-10. The customer sees the persisted result; the provider sees only the
+7. Trigger.dev obtains a signed work packet and reads a bounded source set
+   through the trusted GitHub gateway.
+8. A no-network E2B analyzer receives source but no credentials, uses the
+   TypeScript compiler to produce a bounded symbol index, never executes
+   repository code, and is killed in `finally`.
+9. The spec-driven engine applies only detectors and citations from the run's
+   immutable approved spec revision. Optional unresolved classification
+   rechecks current model consent immediately before minimized snippets leave.
+10. The worker removes excerpts and posts the structured result plus execution
+    evidence over a signed callback.
+11. The control plane validates paths, counts, evidence, locations, engine
+    identity, and offline execution before persisting findings and an encrypted
+    assessment manifest.
+12. The customer sees exact scanned/skipped scope; the provider sees only the
     consented lifecycle state.
 
-Repository source is held in task memory for the current alpha and is not
-persisted. Moving analysis into a no-network E2B analyzer sandbox is a required
-hardening task before broad customer onboarding.
+Repository source is held only in trusted task memory and the ephemeral
+analyzer sandbox; it is not persisted. The assessment manifest records the
+analyzer and sandbox-image versions, offline policy, cleanup timestamps, and
+optional model identity/token counts.
 
 ## GitHub trust boundary
 
@@ -125,7 +133,7 @@ requires versioned customer consent and a visible retention disclosure.
 
 ## Sandbox boundary
 
-The intended three-phase execution model is:
+The three-phase execution model is:
 
 1. Analyzer: AST detection and codemods, no repository code execution.
 2. Dependency preparation: manifests and lockfiles only, registry-only egress,
@@ -133,15 +141,20 @@ The intended three-phase execution model is:
 3. Validation: full repository plus prepared dependencies, offline, no secrets,
    non-root, bounded CPU/RAM/disk/process/output/time.
 
-The E2B adapter already enforces secure sandboxes, egress modes, command
-allowlists, lifecycle-script-disabled installs, output limits, and guaranteed
-kill in `finally`. It is not yet wired into the durable patch workflow.
+The assessment workflow uses a dedicated no-network E2B analyzer containing a
+trusted TypeScript indexer and no secrets. The durable patch workflow uses
+separate E2B preparation and validation
+sandboxes. The preparation sandbox receives only manifests, workspace
+declarations, and lockfiles; lifecycle scripts are disabled and egress is
+registry-only. A trusted transfer carries prepared dependencies into a fresh
+full-repository validation sandbox with no outbound network or secrets.
+Resource/output/time limits and kill-in-`finally` apply throughout.
 
 ## Persistence
 
-The D1 schema has 21 tables:
+The D1 schema has 23 tables:
 
-- organizations, memberships
+- organizations, memberships, provider verification challenges
 - API products, campaigns, migration specs, source artifacts
 - customer invitations, campaign participants
 - GitHub installations, repositories, repository migrations
@@ -150,8 +163,10 @@ The D1 schema has 21 tables:
 - audit events, webhook deliveries, deletion jobs, support grants
 
 Runs remain bound to their original spec revision. Audit events are canonical
-JSON with a SHA-256 predecessor chain. Final run manifests will be stored as
-versioned encrypted artifacts when the patch workflow is completed.
+JSON with a SHA-256 predecessor chain. Approval and publication each persist a
+validated manifest revision in D1 and as an encrypted long-retention artifact;
+the publication revision contains the original approver, draft PR identity,
+and latest audit root.
 
 ## Failure semantics
 

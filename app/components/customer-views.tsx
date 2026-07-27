@@ -467,6 +467,28 @@ function ImpactReport({ data }: { data?: CustomerWorkspaceData }) {
                 <span>
                   <code>{finding.ruleId}</code>
                   <small>{finding.message}</small>
+                  {finding.evidence.length > 0 ? (
+                    <small className="finding-evidence">
+                      Evidence:{" "}
+                      {finding.evidence.map((entry, index) => (
+                        <span key={`${entry.title}-${index}`}>
+                          {index > 0 ? "; " : ""}
+                          {entry.url ? (
+                            <a
+                              className="text-link"
+                              href={entry.url}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              {entry.title}
+                            </a>
+                          ) : (
+                            entry.title
+                          )}
+                        </span>
+                      ))}
+                    </small>
+                  ) : null}
                 </span>
                 <StatusPill
                   tone={
@@ -494,6 +516,56 @@ function ImpactReport({ data }: { data?: CustomerWorkspaceData }) {
             ))}
           </div>
         )}
+      </section>
+
+      <section className="panel analysis-boundaries">
+        <SectionHeading
+          title="Analysis boundaries"
+          description="A no-impact result is only as complete as the explicitly scanned and skipped scope below."
+        />
+        <div className="analysis-boundary-grid">
+          <div>
+            <h3>Scanned source</h3>
+            {summary?.scannedPaths.length ? (
+              <ul>
+                {summary.scannedPaths.map((path) => (
+                  <li key={path}>
+                    <code>{path}</code>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p>No supported source paths were recorded.</p>
+            )}
+          </div>
+          <div>
+            <h3>Skipped or incomplete</h3>
+            {summary?.skipped.length ? (
+              <ul>
+                {summary.skipped.map((entry, index) => (
+                  <li key={`${entry.path}-${index}`}>
+                    <code>{entry.path}</code>
+                    <span>{entry.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p>No skipped source paths were recorded.</p>
+            )}
+          </div>
+          <div>
+            <h3>Dependency warnings</h3>
+            {summary?.dependency.warnings.length ? (
+              <ul>
+                {summary.dependency.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            ) : (
+              <p>No dependency-resolution warnings were recorded.</p>
+            )}
+          </div>
+        </div>
       </section>
     </>
   );
@@ -848,12 +920,48 @@ function PatchReview({
             <DefinitionRow
               label="Transformation"
               value={
-                selected?.ruleIds.length ? "Deterministic codemod" : "Model residual"
+                selected?.transformations
+                  .map((transformation) =>
+                    transformation === "deterministic_codemod"
+                      ? "Deterministic codemod"
+                      : transformation === "parameterized_template"
+                        ? "Parameterized template"
+                        : "Model residual",
+                  )
+                  .join(", ") || "—"
               }
             />
             <DefinitionRow
               label="Rationale"
               value={selected?.rationale.join(" ") || "—"}
+            />
+            <DefinitionRow
+              label="Confidence"
+              value={
+                selected?.evidence.length
+                  ? selected.evidence
+                      .map(
+                        (entry) =>
+                          `${entry.ruleId}: ${Math.round(entry.confidence * 100)}% (${entry.classification.replace("_", " ")})`,
+                      )
+                      .join("; ")
+                  : "—"
+              }
+            />
+            <DefinitionRow
+              label="Provider sources"
+              value={
+                selected?.evidence
+                  .flatMap((entry) => entry.sources)
+                  .filter(
+                    (source, index, sources) => sources.indexOf(source) === index,
+                  )
+                  .join("; ") || "—"
+              }
+            />
+            <DefinitionRow
+              label="Known limitations"
+              value={selected?.knownLimitations.join(" ") || "None recorded"}
             />
             <DefinitionRow
               label="Model consent"
@@ -1091,6 +1199,80 @@ function Policies({
                 </div>
                 <StatusPill>Never shared</StatusPill>
               </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <SectionHeading
+              title="Data portability and early erasure"
+              description="Export persisted migration records or queue source-derived artifacts for storage-verified deletion before their normal expiry."
+            />
+            <div className="retention-actions">
+              <form action="/api/retention/export" method="post">
+                <input name="organizationId" type="hidden" value={workspaceId} />
+                <label className="field">
+                  <span>Migration to export</span>
+                  <select
+                    name="repositoryMigrationId"
+                    defaultValue={selected}
+                    required
+                    disabled={migrations.length === 0}
+                  >
+                    <option value="">Select a migration</option>
+                    {migrations.map((migration) => (
+                      <option value={migration.id} key={migration.id}>
+                        {migration.repositoryOwner}/{migration.repositoryName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  className="button button-secondary"
+                  type="submit"
+                  disabled={migrations.length === 0}
+                >
+                  Export migration records
+                </button>
+              </form>
+              <form action="/api/retention/erase" method="post">
+                <input name="organizationId" type="hidden" value={workspaceId} />
+                <input
+                  name="intent"
+                  type="hidden"
+                  value="erase-source-derived-artifacts"
+                />
+                <label className="field">
+                  <span>Migration to erase</span>
+                  <select
+                    name="repositoryMigrationId"
+                    defaultValue={selected}
+                    required
+                    disabled={migrations.length === 0}
+                  >
+                    <option value="">Select a migration</option>
+                    {migrations.map((migration) => (
+                      <option value={migration.id} key={migration.id}>
+                        {migration.repositoryOwner}/{migration.repositoryName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="consent-check">
+                  <input name="confirmed" type="checkbox" value="yes" required />
+                  <span>
+                    Queue patch, snippet, validation-log, and repository-source
+                    artifacts for immediate verified deletion. Audit metadata and
+                    immutable manifests remain under their stated policy.
+                  </span>
+                </label>
+                <button
+                  className="button button-danger"
+                  type="submit"
+                  disabled={migrations.length === 0}
+                >
+                  Request early erasure
+                </button>
+              </form>
             </div>
           </section>
         </div>

@@ -32,8 +32,12 @@ Every stored patch, validation log, and run manifest is encrypted with
 AES-256-GCM under this key. Its identifier is derived from the key material and
 recorded on each artifact, so rotating the key makes previously stored artifacts
 unreadable by design; treat rotation as an erasure event and drain the deletion
-queue first. Without this setting the patch workflow fails closed and no patch
-can be persisted or reviewed.
+queue first. Without this setting the assessment and patch workflows fail
+closed and no immutable run manifest or patch can be persisted.
+
+Set `E2B_ASSESSMENT_IMAGE_VERSION` to the immutable release identifier of the
+configured E2B analyzer image. Assessment completion rejects missing execution
+evidence; do not use mutable labels such as `latest`.
 
 ## GitHub App registration
 
@@ -56,9 +60,9 @@ Administration, Workflows, Secrets, Deployments, Issues, or Members.
 ## Trigger.dev
 
 Set `TRIGGER_PROJECT_REF`, `TRIGGER_SECRET_KEY`, and
-`WORKFLOW_CALLBACK_SECRET`. Deploy `trigger/assessment.ts` from
-`trigger.config.ts` with `npm run trigger:deploy`. Confirm the indexed task ID
-is `assessment-run`.
+`WORKFLOW_CALLBACK_SECRET`. Deploy from `trigger.config.ts` with
+`npm run trigger:deploy`. Confirm the indexed tasks include `assessment-run`,
+`patch-run`, and `retention-sweep`.
 
 The web control plane dispatches only `{runId, controlPlaneUrl}`. The task
 retrieves GitHub details through a signed work-packet endpoint and posts a
@@ -108,8 +112,6 @@ Scanner-connected state and retains the infrastructure category.
 
 ## Deletion policy
 
-Target policy:
-
 - Source archives and sandboxes: immediate after a completed run, 24-hour hard
   TTL after interruption
 - Customer snippets, diffs, validation logs: 30 days by default
@@ -117,9 +119,9 @@ Target policy:
   earlier customer deletion
 - Provider campaign artifacts: while the campaign is active
 
-The schema supports deletion jobs, but the scheduled worker and verification
-sweeper are not implemented yet. Until they are, do not onboard third-party
-customer source beyond an owned beta repository.
+The scheduled `retention-sweep` task implements this policy. Do not onboard
+third-party customer source until that task is deployed in the real Trigger.dev
+project and an owned-repository drill proves object deletion.
 
 ## Release verification
 
@@ -128,6 +130,7 @@ Run:
 ```bash
 npm ci
 npm run lint
+npm run eval:assessment
 npm test
 ```
 

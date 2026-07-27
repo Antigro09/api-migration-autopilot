@@ -2,15 +2,17 @@ import { getD1 } from "@/db";
 import { ensureDatabaseSchema } from "@/db/runtime";
 import {
   parseRunManifestV1,
+  sha256Hex,
   type JsonObject,
   type RunManifestV1,
   type TenantContext,
 } from "@/lib/domain";
 import { DomainError } from "@/lib/domain/errors";
 import { GitHubAppGateway } from "@/lib/integrations/github";
+import type { GitHubGateway } from "@/lib/integrations/github";
 import type { FileEdit } from "@/lib/migration/contracts";
 import { createPatchHash } from "@/lib/migration/patch-security";
-import { readRunArtifact } from "./artifacts";
+import { readRunArtifact, storeRunArtifact } from "./artifacts";
 import { appendAuditEvent } from "./control-plane";
 
 export type ApprovalIntent = "open-draft-pr";
@@ -44,6 +46,7 @@ type RunRecord = {
   baseSha: string;
   patchSha256: string | null;
   approvedPatchSha256: string | null;
+  approvedByMembershipId: string | null;
   approvedAt: string | null;
   manifest: string | null;
   participantId: string;
@@ -88,6 +91,7 @@ async function loadRun(
         mr.base_sha AS baseSha,
         mr.patch_sha256 AS patchSha256,
         mr.approved_patch_sha256 AS approvedPatchSha256,
+        mr.approved_by_membership_id AS approvedByMembershipId,
         mr.approved_at AS approvedAt,
         mr.manifest,
         rm.campaign_participant_id AS participantId,
@@ -114,6 +118,73 @@ async function loadRun(
     );
   }
   return run;
+}
+
+async function auditChainSummary(
+  organizationId: string,
+  runId: string,
+): Promise<{ eventCount: number; rootHash: string }> {
+  const summary = await getD1()
+    .prepare(
+      `SELECT COUNT(*) AS eventCount,
+              (SELECT event_hash FROM audit_events
+               WHERE organization_id = ? AND aggregate_type = 'run'
+                 AND aggregate_id = ?
+               ORDER BY sequence DESC LIMIT 1) AS rootHash
+       FROM audit_events
+       WHERE organization_id = ? AND aggregate_type = 'run'
+         AND aggregate_id = ?`,
+    )
+    .bind(organizationId, runId, organizationId, runId)
+    .first<{ eventCount: number; rootHash: string | null }>();
+  if (!summary?.rootHash) {
+    throw new DomainError(
+      "AUDIT_CHAIN_INVALID",
+      "The run has no audit chain to anchor its finalized manifest.",
+    );
+  }
+  return {
+    eventCount: Number(summary.eventCount),
+    rootHash: summary.rootHash,
+  };
+}
+
+/**
+ * Persists every durable manifest revision both in D1 and as the encrypted
+ * long-retention artifact. Approval and publication use this after their audit
+ * event is appended so the manifest's audit root proves the exact state it
+ * describes.
+ */
+async function persistManifestRevision(input: {
+  organizationId: string;
+  campaignId: string;
+  runId: string;
+  manifest: RunManifestV1;
+}): Promise<void> {
+  const serialized = JSON.stringify(input.manifest);
+  await storeRunArtifact({
+    organizationId: input.organizationId,
+    runId: input.runId,
+    campaignId: input.campaignId,
+    kind: "run_manifest",
+    storageKey: `runs/${input.runId}/manifest.json`,
+    contentType: "application/json",
+    plaintext: serialized,
+  });
+  await getD1()
+    .prepare(
+      `UPDATE migration_runs
+       SET manifest = ?, manifest_sha256 = ?, updated_at = ?
+       WHERE id = ? AND organization_id = ?`,
+    )
+    .bind(
+      serialized,
+      await sha256Hex(serialized),
+      isoNow(),
+      input.runId,
+      input.organizationId,
+    )
+    .run();
 }
 
 export async function loadPatchRecord(
@@ -219,6 +290,52 @@ export async function approvePatch(input: {
 
   const run = await loadRun(input.tenant.organizationId, input.runId);
   if (
+    ["approved", "publishing", "pr_open", "merged", "verified"].includes(
+      run.state,
+    ) &&
+    run.approvedPatchSha256?.toLowerCase() === input.patchHash.toLowerCase()
+  ) {
+    if (
+      run.manifest &&
+      run.approvedByMembershipId &&
+      run.approvedAt
+    ) {
+      const manifest = parseRunManifestV1(
+        typeof run.manifest === "string"
+          ? JSON.parse(run.manifest)
+          : run.manifest,
+      );
+      if (
+        !manifest.approval ||
+        manifest.approval.patchSha256 !== run.approvedPatchSha256 ||
+        manifest.approval.approvedByMembershipId !==
+          run.approvedByMembershipId
+      ) {
+        await persistManifestRevision({
+          organizationId: input.tenant.organizationId,
+          campaignId: run.campaignId,
+          runId: input.runId,
+          manifest: parseRunManifestV1({
+            ...manifest,
+            approval: {
+              patchSha256: run.approvedPatchSha256,
+              approvedByMembershipId: run.approvedByMembershipId,
+              approvedAt: run.approvedAt,
+            },
+            audit: await auditChainSummary(
+              input.tenant.organizationId,
+              input.runId,
+            ),
+          }),
+        });
+      }
+    }
+    return {
+      approvedPatchSha256: run.approvedPatchSha256,
+      warned: false,
+    };
+  }
+  if (
     !["awaiting_review", "validation_failed", "validation_incomplete"].includes(
       run.state,
     )
@@ -252,7 +369,7 @@ export async function approvePatch(input: {
   const warned = run.state !== "awaiting_review";
   const now = isoNow();
   const database = getD1();
-  await database.batch([
+  const approvalResults = await database.batch([
     database
       .prepare(
         `UPDATE migration_runs
@@ -273,17 +390,58 @@ export async function approvePatch(input: {
       .prepare(
         `UPDATE patches
          SET approved_at = ?, approved_by_membership_id = ?
-         WHERE id = ? AND organization_id = ?`,
+         WHERE id = ? AND organization_id = ?
+           AND EXISTS (
+             SELECT 1 FROM migration_runs
+             WHERE migration_runs.id = patches.run_id
+               AND migration_runs.organization_id = patches.organization_id
+               AND migration_runs.state = 'approved'
+               AND migration_runs.approved_by_membership_id = ?
+               AND migration_runs.approved_at = ?
+           )`,
       )
-      .bind(now, input.tenant.membershipId, record.patchId, input.tenant.organizationId),
+      .bind(
+        now,
+        input.tenant.membershipId,
+        record.patchId,
+        input.tenant.organizationId,
+        input.tenant.membershipId,
+        now,
+      ),
     database
       .prepare(
         `UPDATE repository_migrations
          SET state = 'approved_for_pr', updated_at = ?
-         WHERE id = ? AND organization_id = ?`,
+         WHERE id = ? AND organization_id = ?
+           AND state IN ('ready_for_review', 'validation_failed', 'validation_incomplete')
+           AND EXISTS (
+             SELECT 1 FROM migration_runs
+             WHERE migration_runs.id = ? AND migration_runs.organization_id = ?
+               AND migration_runs.state = 'approved'
+               AND migration_runs.approved_by_membership_id = ?
+               AND migration_runs.approved_at = ?
+           )`,
       )
-      .bind(now, run.repositoryMigrationId, input.tenant.organizationId),
+      .bind(
+        now,
+        run.repositoryMigrationId,
+        input.tenant.organizationId,
+        input.runId,
+        input.tenant.organizationId,
+        input.tenant.membershipId,
+        now,
+      ),
   ]);
+  if (
+    approvalResults[0]?.meta.changes !== 1 ||
+    approvalResults[1]?.meta.changes !== 1 ||
+    approvalResults[2]?.meta.changes !== 1
+  ) {
+    throw new DomainError(
+      "CONCURRENT_MODIFICATION",
+      "The run changed while the exact-hash approval was recorded. Reload its current state.",
+    );
+  }
 
   await appendAuditEvent({
     organizationId: input.tenant.organizationId,
@@ -298,12 +456,40 @@ export async function approvePatch(input: {
       warnedApproval: warned,
     },
   });
+  if (run.manifest) {
+    const manifest = parseRunManifestV1(
+      typeof run.manifest === "string"
+        ? JSON.parse(run.manifest)
+        : run.manifest,
+    );
+    await persistManifestRevision({
+      organizationId: input.tenant.organizationId,
+      campaignId: run.campaignId,
+      runId: input.runId,
+      manifest: parseRunManifestV1({
+        ...manifest,
+        approval: {
+          patchSha256: recomputedSha256,
+          approvedByMembershipId: input.tenant.membershipId,
+          approvedAt: now,
+        },
+        audit: await auditChainSummary(
+          input.tenant.organizationId,
+          input.runId,
+        ),
+      }),
+    });
+  }
   return { approvedPatchSha256: recomputedSha256, warned };
 }
 
 export async function publishApprovedPatch(input: {
   tenant: TenantContext;
   runId: string;
+  gateway?: Pick<
+    GitHubGateway,
+    "getBranchSha" | "publishDraftPullRequest"
+  >;
 }): Promise<{
   number: number;
   url: string;
@@ -340,6 +526,12 @@ export async function publishApprovedPatch(input: {
       "The run has no recorded exact-hash approval.",
     );
   }
+  if (!run.approvedByMembershipId || !run.approvedAt) {
+    throw new DomainError(
+      "FORBIDDEN",
+      "The exact-hash approval record is incomplete and must be repaired before publication.",
+    );
+  }
   if (!run.patcherInstallationId || run.patcherStatus !== "active") {
     throw new DomainError(
       "FORBIDDEN",
@@ -364,7 +556,7 @@ export async function publishApprovedPatch(input: {
     );
   }
 
-  const gateway = new GitHubAppGateway();
+  const gateway = input.gateway ?? new GitHubAppGateway();
   // Re-read the branch head immediately before the write; a moved default
   // branch invalidates the approval rather than silently rebasing.
   const currentSha = await gateway.getBranchSha({
@@ -437,16 +629,37 @@ export async function publishApprovedPatch(input: {
 
   const now = isoNow();
   const manifest: RunManifestV1 | null = run.manifest
-    ? (JSON.parse(run.manifest) as RunManifestV1)
+    ? parseRunManifestV1(
+        typeof run.manifest === "string"
+          ? JSON.parse(run.manifest)
+          : run.manifest,
+      )
     : null;
-  // Re-validated so a finalized manifest can never drift from the contract.
-  const finalized: RunManifestV1 | null = manifest
+  await appendAuditEvent({
+    organizationId: input.tenant.organizationId,
+    aggregateType: "run",
+    aggregateId: input.runId,
+    action: "patch.draft_pr_published",
+    actorMembershipId: input.tenant.membershipId,
+    payload: {
+      patchSha256: recomputedSha256,
+      pullRequestNumber: pullRequest.number,
+      branch: pullRequest.branch,
+      existing: pullRequest.existing,
+      baseSha: run.baseSha,
+    },
+  });
+
+  // Re-validated and encrypted after the publication audit event so the
+  // finalized artifact contains the actual approver, PR identity, and latest
+  // audit-chain root rather than a pre-publication snapshot.
+  const finalized = manifest
     ? parseRunManifestV1({
         ...manifest,
         approval: {
           patchSha256: recomputedSha256,
-          approvedByMembershipId: input.tenant.membershipId,
-          approvedAt: run.approvedAt ?? now,
+          approvedByMembershipId: run.approvedByMembershipId,
+          approvedAt: run.approvedAt,
         },
         pullRequest: {
           provider: "github",
@@ -455,19 +668,38 @@ export async function publishApprovedPatch(input: {
           branch: pullRequest.branch,
           draft: true,
         },
-        timestamps: { ...manifest.timestamps, completedAt: now },
+        audit: await auditChainSummary(
+          input.tenant.organizationId,
+          input.runId,
+        ),
+        timestamps: {
+          ...manifest.timestamps,
+          completedAt: new Date(
+            Math.max(
+              Date.parse(manifest.timestamps.completedAt),
+              Date.parse(now),
+            ),
+          ).toISOString(),
+        },
       })
     : null;
+  if (finalized) {
+    await persistManifestRevision({
+      organizationId: input.tenant.organizationId,
+      campaignId: run.campaignId,
+      runId: input.runId,
+      manifest: finalized,
+    });
+  }
 
   await database.batch([
     database
       .prepare(
         `UPDATE migration_runs
-         SET state = 'pr_open', manifest = COALESCE(?, manifest), updated_at = ?
+         SET state = 'pr_open', updated_at = ?
          WHERE id = ? AND organization_id = ?`,
       )
       .bind(
-        finalized ? JSON.stringify(finalized) : null,
         now,
         input.runId,
         input.tenant.organizationId,
@@ -487,21 +719,6 @@ export async function publishApprovedPatch(input: {
       )
       .bind(now, run.participantId),
   ]);
-
-  await appendAuditEvent({
-    organizationId: input.tenant.organizationId,
-    aggregateType: "run",
-    aggregateId: input.runId,
-    action: "patch.draft_pr_published",
-    actorMembershipId: input.tenant.membershipId,
-    payload: {
-      patchSha256: recomputedSha256,
-      pullRequestNumber: pullRequest.number,
-      branch: pullRequest.branch,
-      existing: pullRequest.existing,
-      baseSha: run.baseSha,
-    },
-  });
 
   return pullRequest;
 }

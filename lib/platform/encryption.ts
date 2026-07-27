@@ -49,10 +49,13 @@ async function importKey(): Promise<{ key: CryptoKey; keyId: string }> {
 }
 
 export async function encryptArtifact(
-  plaintext: string,
+  plaintext: string | Uint8Array,
 ): Promise<EncryptedArtifact> {
   const { key, keyId } = await importKey();
-  const encoded = new TextEncoder().encode(plaintext);
+  const encoded =
+    typeof plaintext === "string"
+      ? new TextEncoder().encode(plaintext)
+      : Uint8Array.from(plaintext);
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const ciphertext = new Uint8Array(
     await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoded),
@@ -70,11 +73,11 @@ export async function encryptArtifact(
   };
 }
 
-export async function decryptArtifact(input: {
+export async function decryptArtifactBytes(input: {
   body: ArrayBuffer | Uint8Array;
   expectedKeyId?: string;
   expectedPlaintextSha256?: string;
-}): Promise<string> {
+}): Promise<Uint8Array> {
   const { key, keyId } = await importKey();
   if (input.expectedKeyId && input.expectedKeyId !== keyId) {
     throw new Error(
@@ -100,5 +103,13 @@ export async function decryptArtifact(input: {
   ) {
     throw new Error("The decrypted artifact does not match its recorded hash.");
   }
-  return new TextDecoder().decode(plaintextBytes);
+  return plaintextBytes;
+}
+
+export async function decryptArtifact(input: {
+  body: ArrayBuffer | Uint8Array;
+  expectedKeyId?: string;
+  expectedPlaintextSha256?: string;
+}): Promise<string> {
+  return new TextDecoder().decode(await decryptArtifactBytes(input));
 }

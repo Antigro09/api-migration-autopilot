@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { parseMigrationSpecV1 } from "../lib/domain";
 import { assessStripeV20ToV22 } from "../lib/migration/analyzer";
 import type { RepositoryFile } from "../lib/migration/contracts";
 import {
   normalizeRepositoryPath,
   validateProposedPatch,
 } from "../lib/migration/patch-security";
-import { createDeterministicStripePatch } from "../lib/migration/transformer";
+import {
+  createDeterministicStripePatch,
+  createParameterizedTemplatePatch,
+} from "../lib/migration/transformer";
 
 const files: RepositoryFile[] = [
   {
@@ -88,4 +92,104 @@ test("patch validation blocks traversal and workflow changes", async () => {
   });
   assert.equal(result.valid, false);
   assert.ok(result.issues.some((issue) => issue.code === "workflow-file"));
+});
+
+test("provider templates apply only to the exact detected candidate range", async () => {
+  const source = "const client = oldClient(key);\nconst untouched = oldClient(key);\n";
+  const before = "oldClient(key)";
+  const start = source.indexOf(before);
+  const spec = parseMigrationSpecV1({
+    schemaVersion: "1",
+    id: "spec_template",
+    organizationId: "org_template",
+    campaignId: "cmp_template",
+    revision: 1,
+    status: "draft",
+    providerName: "Provider",
+    productName: "Provider SDK",
+    package: {
+      ecosystem: "npm",
+      name: "@provider/sdk",
+      language: "typescript",
+      sourceRange: ">=1 <2",
+      targetVersion: "2.0.0",
+    },
+    sourceArtifacts: [
+      {
+        id: "artifact_template",
+        title: "Migration guide",
+        kind: "markdown",
+        mediaType: "text/markdown",
+        sha256: "1".repeat(64),
+      },
+    ],
+    changes: [
+      {
+        id: "SDK-TEMPLATE",
+        title: "Construct the new client",
+        description: "Use the v2 constructor.",
+        severity: "breaking",
+        citations: [
+          {
+            artifactId: "artifact_template",
+            locator: "Constructor",
+            excerpt: "Replace oldClient with new Client.",
+          },
+        ],
+        detectors: [
+          {
+            kind: "call_expression",
+            moduleName: "@provider/sdk",
+            symbol: "oldClient",
+            configuration: {},
+          },
+        ],
+        transformation: {
+          kind: "parameterized_template",
+          recipeId: "literal-text-replacement-v1",
+          parameters: {
+            before,
+            after: "new Client(key)",
+          },
+          requiresModelConsent: false,
+        },
+        behavioralInvariants: ["The credential is unchanged."],
+        validationHints: ["Run typecheck."],
+        autoPatchEligible: true,
+        knownLimitations: ["Wrappers require review."],
+      },
+    ],
+    generalLimitations: ["Dynamic calls are partial coverage."],
+    createdAt: new Date().toISOString(),
+  });
+  const patch = await createParameterizedTemplatePatch({
+    baseSha: "a".repeat(40),
+    files: [{ path: "src/client.ts", content: source }],
+    findings: [
+      {
+        id: "finding_template",
+        ruleId: "SDK-TEMPLATE",
+        path: "src/client.ts",
+        location: {
+          start,
+          end: start + before.length,
+          line: 1,
+          column: start + 1,
+        },
+        excerpt: "",
+        message: "Detected the legacy constructor.",
+        confidence: "certain",
+        coverage: "full",
+        autoPatchEligible: true,
+        evidence: [],
+      },
+    ],
+    spec,
+  });
+  assert.equal(patch.files.length, 1);
+  assert.equal(patch.patchedFindingIds[0], "finding_template");
+  assert.equal(
+    patch.files[0]?.newContent,
+    "const client = new Client(key);\nconst untouched = oldClient(key);\n",
+  );
 });

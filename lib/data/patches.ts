@@ -639,7 +639,7 @@ export async function checkModelConsentForRun(runId: string): Promise<{
       `SELECT organization_id AS organizationId,
               repository_migration_id AS repositoryMigrationId
        FROM migration_runs
-       WHERE id = ? AND kind = 'patch'
+       WHERE id = ?
          AND state IN ('acquiring_source', 'generating', 'analyzing')
        LIMIT 1`,
     )
@@ -772,7 +772,14 @@ export async function submitPatchResult(input: {
     })),
   ];
 
-  const now = isoNow();
+  const createdAt = normalizeTimestamp(run.createdAt);
+  const parsedStartedAt = normalizeTimestamp(run.startedAt ?? run.createdAt);
+  const startedAt = new Date(
+    Math.max(Date.parse(createdAt), Date.parse(parsedStartedAt)),
+  ).toISOString();
+  const now = new Date(
+    Math.max(Date.now(), Date.parse(startedAt)),
+  ).toISOString();
   // A patch that fails either integrity gate can never be published, so it is
   // never persisted as reviewable work: the run fails and its scratch material
   // is queued for deletion.
@@ -967,8 +974,8 @@ export async function submitPatchResult(input: {
     cost: input.result.cost,
     audit: auditSummary,
     timestamps: {
-      createdAt: normalizeTimestamp(run.createdAt),
-      startedAt: normalizeTimestamp(run.startedAt ?? run.createdAt),
+      createdAt,
+      startedAt,
       completedAt: now,
     },
     cleanup: {

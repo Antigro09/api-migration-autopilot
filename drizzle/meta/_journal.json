@@ -15,6 +15,20 @@
       "when": 1785043508925,
       "tag": "0001_patch_workflow",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1785076893419,
+      "tag": "0002_far_chameleon",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1785077716756,
+      "tag": "0003_green_ironclad",
+      "breakpoints": true
     }
   ]
 }

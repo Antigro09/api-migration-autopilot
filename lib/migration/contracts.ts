@@ -7,7 +7,7 @@ export type Coverage = "full" | "partial" | "unsupported";
 
 export interface SourceCitation {
   readonly title: string;
-  readonly url: string;
+  readonly url?: string;
   readonly excerpt?: string;
 }
 
@@ -211,4 +211,3 @@ export interface RunManifestV1 {
     readonly message?: string;
   };
 }
-

@@ -1,8 +1,10 @@
 import { getD1 } from "@/db";
 import { ensureDatabaseSchema } from "@/db/runtime";
 import {
+  canTransitionCampaign,
   parseMigrationSpecV1,
   sha256Hex,
+  type CampaignState,
   type MigrationChangeV1 as DomainChange,
   type MigrationSpecV1 as DomainSpec,
   type TenantContext,
@@ -10,6 +12,8 @@ import {
 import { DomainError } from "@/lib/domain/errors";
 import { stripeV20ToV22Spec } from "@/lib/migration/specs/stripe-v20-v22";
 import { R2ArtifactStore } from "@/lib/platform/artifacts";
+import { encryptArtifact } from "@/lib/platform/encryption";
+import { extractProviderArtifact } from "@/lib/provider/artifact-intake";
 import {
   appendAuditEvent,
   createCampaign,
@@ -24,6 +28,7 @@ export type SpecReviewRecord = {
   revision: number;
   status: "draft" | "approved" | "superseded";
   contentSha256: string;
+  submittedForReviewAt: string | null;
   content: DomainSpec;
   createdAt: string;
 };
@@ -142,7 +147,13 @@ export function domainChange(
     description: change.description,
     severity: severity(change.severity),
     citations: change.citations.map((citation) => ({
-      artifactId: sourceIdForUrl(citation.url, artifactIds),
+      artifactId: sourceIdForUrl(
+        citation.url ??
+          (() => {
+            throw new Error("The reference campaign citation URL is missing.");
+          })(),
+        artifactIds,
+      ),
       locator: citation.title,
       ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
     })),
@@ -225,11 +236,28 @@ export async function createStripeReferenceCampaign(
   const now = new Date().toISOString();
   const storage = new R2ArtifactStore();
   const idSuffix = campaign.id.slice(-8);
-  const storedSources = sources.map((source) => ({
-    ...source,
-    id: `${source.id}-${idSuffix}`,
-    storageKey: `campaigns/${campaign.id}/sources/${source.id}`,
-  }));
+  const storedSources = await Promise.all(
+    sources.map(async (source) => {
+      const bytes = new Uint8Array(source.content);
+      const extracted = await extractProviderArtifact({
+        bytes,
+        mediaType: source.mediaType,
+        kind: source.kind,
+        externalUrl: source.externalUrl,
+      });
+      const rawEnvelope = await encryptArtifact(bytes);
+      const extractedEnvelope = await encryptArtifact(extracted.text);
+      return {
+        ...source,
+        id: `${source.id}-${idSuffix}`,
+        storageKey: `campaigns/${campaign.id}/sources/${source.id}/raw`,
+        extractedStorageKey: `campaigns/${campaign.id}/sources/${source.id}/extracted.txt`,
+        rawEnvelope,
+        extractedEnvelope,
+        extracted,
+      };
+    }),
+  );
   const artifactIds = new Map(
     sources.map((source, index) => [
       source.id,
@@ -241,11 +269,21 @@ export async function createStripeReferenceCampaign(
     await storage.put(
       tenant.organizationId,
       source.storageKey,
-      source.content,
+      source.rawEnvelope.body,
       {
-        contentType: source.mediaType,
+        contentType: "application/octet-stream",
         retention: "audit-manifest",
         sha256: source.sha256,
+      },
+    );
+    await storage.put(
+      tenant.organizationId,
+      source.extractedStorageKey,
+      source.extractedEnvelope.body,
+      {
+        contentType: "application/octet-stream",
+        retention: "audit-manifest",
+        sha256: source.extractedEnvelope.plaintextSha256,
       },
     );
   }
@@ -291,8 +329,8 @@ export async function createStripeReferenceCampaign(
       .prepare(
         `INSERT INTO migration_specs (
           id, organization_id, campaign_id, revision, status, content,
-          content_sha256, created_by_membership_id
-        ) VALUES (?, ?, ?, 1, 'draft', ?, ?, ?)`,
+          content_sha256, submitted_for_review_at, created_by_membership_id
+        ) VALUES (?, ?, ?, 1, 'draft', ?, ?, ?, ?)`,
       )
       .bind(
         specId,
@@ -300,6 +338,7 @@ export async function createStripeReferenceCampaign(
         campaign.id,
         JSON.stringify(spec),
         contentSha256,
+        now,
         tenant.membershipId,
       ),
     getD1()
@@ -316,8 +355,11 @@ export async function createStripeReferenceCampaign(
           `INSERT INTO source_artifacts (
             id, organization_id, campaign_id, migration_spec_id,
             title, source_kind, media_type, storage_key, sha256,
-            external_url, size_bytes
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            encryption_key_id, extracted_storage_key, extracted_sha256,
+            extracted_encryption_key_id, extraction_status,
+            extraction_message, page_count, external_url, size_bytes,
+            uploaded_by_membership_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           source.id,
@@ -329,8 +371,16 @@ export async function createStripeReferenceCampaign(
           source.mediaType,
           source.storageKey,
           source.sha256,
+          source.rawEnvelope.encryptionKeyId,
+          source.extractedStorageKey,
+          source.extractedEnvelope.plaintextSha256,
+          source.extractedEnvelope.encryptionKeyId,
+          source.extracted.status,
+          source.extracted.message ?? null,
+          source.extracted.pageCount ?? null,
           source.externalUrl,
           source.content.byteLength,
+          tenant.membershipId,
         ),
     ),
   ];
@@ -339,7 +389,13 @@ export async function createStripeReferenceCampaign(
   } catch (error) {
     await Promise.allSettled(
       storedSources.map((source) =>
-        storage.delete(tenant.organizationId, source.storageKey),
+        Promise.all([
+          storage.delete(tenant.organizationId, source.storageKey),
+          storage.delete(
+            tenant.organizationId,
+            source.extractedStorageKey,
+          ),
+        ]),
       ),
     );
     throw error;
@@ -372,6 +428,7 @@ export async function createStripeReferenceCampaign(
       revision: 1,
       status: "draft",
       contentSha256,
+      submittedForReviewAt: now,
       content: spec,
       createdAt: now,
     },
@@ -391,6 +448,7 @@ export async function listSpecsForReview(
         ms.revision,
         ms.status,
         ms.content_sha256 AS contentSha256,
+        ms.submitted_for_review_at AS submittedForReviewAt,
         ms.content,
         ms.created_at AS createdAt
        FROM migration_specs ms
@@ -418,8 +476,9 @@ export async function approveMigrationSpec(input: {
 }): Promise<{ approvedContentSha256: string }> {
   await ensureDatabaseSchema();
   if (
-    input.tenant.role !== "admin" &&
-    input.tenant.role !== "approver"
+    input.tenant.organizationKind !== "provider" ||
+    (input.tenant.role !== "admin" &&
+      input.tenant.role !== "approver")
   ) {
     throw new DomainError(
       "FORBIDDEN",
@@ -429,7 +488,9 @@ export async function approveMigrationSpec(input: {
   const record = await getD1()
     .prepare(
       `SELECT ms.content, ms.content_sha256 AS contentSha256, ms.status,
-              c.status AS campaignStatus
+              ms.submitted_for_review_at AS submittedForReviewAt,
+              c.status AS campaignStatus,
+              c.current_spec_id AS currentSpecId
        FROM migration_specs ms
        JOIN campaigns c ON c.id = ms.campaign_id
        WHERE ms.id = ? AND ms.campaign_id = ?
@@ -446,16 +507,21 @@ export async function approveMigrationSpec(input: {
       content: string | DomainSpec;
       contentSha256: string;
       status: string;
-      campaignStatus: string;
+      submittedForReviewAt: string | null;
+      campaignStatus: CampaignState;
+      currentSpecId: string | null;
     }>();
   if (!record) throw new DomainError("NOT_FOUND", "Migration spec not found.");
   if (
     record.status !== "draft" ||
-    record.campaignStatus !== "provider_review"
+    !record.submittedForReviewAt ||
+    !["provider_review", "approved", "live", "paused"].includes(
+      record.campaignStatus,
+    )
   ) {
     throw new DomainError(
       "INVALID_STATE_TRANSITION",
-      "Only a draft specification in provider review can be approved.",
+      "Only a submitted draft for an active campaign can be approved.",
     );
   }
   if (record.contentSha256 !== input.expectedContentSha256) {
@@ -477,14 +543,44 @@ export async function approveMigrationSpec(input: {
     approvedByMembershipId: input.tenant.membershipId,
   });
   const approvedContentSha256 = await sha256Hex(JSON.stringify(approved));
-  await getD1().batch([
+  const results = await getD1().batch([
+    getD1()
+      .prepare(
+        `UPDATE campaigns
+         SET status = CASE WHEN status = 'provider_review'
+                           THEN 'approved' ELSE status END,
+             current_spec_id = ?, updated_at = ?
+         WHERE id = ? AND organization_id = ?
+           AND status IN ('provider_review', 'approved', 'live', 'paused')
+           AND EXISTS (
+             SELECT 1 FROM migration_specs
+             WHERE id = ? AND campaign_id = campaigns.id
+               AND organization_id = campaigns.organization_id
+               AND status = 'draft' AND content_sha256 = ?
+               AND submitted_for_review_at IS NOT NULL
+           )`,
+      )
+      .bind(
+        input.specId,
+        approvedAt,
+        input.campaignId,
+        input.tenant.organizationId,
+        input.specId,
+        input.expectedContentSha256,
+      ),
     getD1()
       .prepare(
         `UPDATE migration_specs
          SET status = 'approved', content = ?, content_sha256 = ?,
              approved_by_membership_id = ?, approved_at = ?
          WHERE id = ? AND organization_id = ?
-           AND status = 'draft' AND content_sha256 = ?`,
+           AND status = 'draft' AND content_sha256 = ?
+           AND EXISTS (
+             SELECT 1 FROM campaigns
+             WHERE campaigns.id = migration_specs.campaign_id
+               AND campaigns.organization_id = migration_specs.organization_id
+               AND campaigns.current_spec_id = migration_specs.id
+           )`,
       )
       .bind(
         JSON.stringify(approved),
@@ -497,17 +593,23 @@ export async function approveMigrationSpec(input: {
       ),
     getD1()
       .prepare(
-        `UPDATE campaigns
-         SET status = 'approved', current_spec_id = ?, updated_at = ?
-         WHERE id = ? AND organization_id = ? AND status = 'provider_review'`,
+        `UPDATE migration_specs
+         SET status = 'superseded'
+         WHERE campaign_id = ? AND organization_id = ?
+           AND id <> ? AND status = 'approved'`,
       )
       .bind(
-        input.specId,
-        approvedAt,
         input.campaignId,
         input.tenant.organizationId,
+        input.specId,
       ),
   ]);
+  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    throw new DomainError(
+      "CONCURRENT_MODIFICATION",
+      "The specification or campaign changed while approval was recorded.",
+    );
+  }
   await appendAuditEvent({
     organizationId: input.tenant.organizationId,
     aggregateType: "campaign",
@@ -518,9 +620,81 @@ export async function approveMigrationSpec(input: {
       specId: input.specId,
       reviewedContentSha256: input.expectedContentSha256,
       approvedContentSha256,
+      supersededSpecId:
+        record.currentSpecId === input.specId ? null : record.currentSpecId,
     },
   });
   return { approvedContentSha256 };
+}
+
+export async function transitionCampaign(input: {
+  tenant: TenantContext;
+  campaignId: string;
+  target: Extract<CampaignState, "live" | "paused" | "completed" | "archived">;
+}): Promise<void> {
+  await ensureDatabaseSchema();
+  if (
+    input.tenant.organizationKind !== "provider" ||
+    !["admin", "operator"].includes(input.tenant.role)
+  ) {
+    throw new DomainError(
+      "FORBIDDEN",
+      "A provider admin or operator is required to change campaign state.",
+    );
+  }
+  const campaign = await getCampaign(
+    input.tenant.organizationId,
+    input.campaignId,
+  );
+  if (!campaign) throw new DomainError("NOT_FOUND", "Campaign not found.");
+  if (!canTransitionCampaign(campaign.status, input.target)) {
+    throw new DomainError(
+      "INVALID_STATE_TRANSITION",
+      `The campaign cannot move from ${campaign.status} to ${input.target}.`,
+    );
+  }
+  const now = new Date().toISOString();
+  const result = await getD1()
+    .prepare(
+      `UPDATE campaigns
+       SET status = ?,
+           launched_at = CASE WHEN ? = 'live'
+                              THEN COALESCE(launched_at, ?) ELSE launched_at END,
+           completed_at = CASE WHEN ? = 'completed'
+                               THEN ? ELSE completed_at END,
+           archived_at = CASE WHEN ? = 'archived'
+                              THEN ? ELSE archived_at END,
+           updated_at = ?
+       WHERE id = ? AND organization_id = ? AND status = ?`,
+    )
+    .bind(
+      input.target,
+      input.target,
+      now,
+      input.target,
+      now,
+      input.target,
+      now,
+      now,
+      campaign.id,
+      input.tenant.organizationId,
+      campaign.status,
+    )
+    .run();
+  if (result.meta.changes !== 1) {
+    throw new DomainError(
+      "CONCURRENT_MODIFICATION",
+      "The campaign changed while the state transition was recorded.",
+    );
+  }
+  await appendAuditEvent({
+    organizationId: input.tenant.organizationId,
+    aggregateType: "campaign",
+    aggregateId: campaign.id,
+    action: `campaign.${input.target}`,
+    actorMembershipId: input.tenant.membershipId,
+    payload: { from: campaign.status, to: input.target },
+  });
 }
 
 export async function launchCampaign(input: {
@@ -528,7 +702,10 @@ export async function launchCampaign(input: {
   campaignId: string;
 }): Promise<void> {
   await ensureDatabaseSchema();
-  if (input.tenant.role !== "admin" && input.tenant.role !== "operator") {
+  if (
+    input.tenant.organizationKind !== "provider" ||
+    (input.tenant.role !== "admin" && input.tenant.role !== "operator")
+  ) {
     throw new DomainError(
       "FORBIDDEN",
       "Your organization role cannot launch campaigns.",
@@ -546,7 +723,7 @@ export async function launchCampaign(input: {
     );
   }
   const now = new Date().toISOString();
-  await getD1()
+  const result = await getD1()
     .prepare(
       `UPDATE campaigns
        SET status = 'live', launched_at = ?, updated_at = ?
@@ -554,6 +731,12 @@ export async function launchCampaign(input: {
     )
     .bind(now, now, campaign.id, input.tenant.organizationId)
     .run();
+  if (result.meta.changes !== 1) {
+    throw new DomainError(
+      "CONCURRENT_MODIFICATION",
+      "The campaign changed while launch was recorded.",
+    );
+  }
   await appendAuditEvent({
     organizationId: input.tenant.organizationId,
     aggregateType: "campaign",

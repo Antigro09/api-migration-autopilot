@@ -53,12 +53,22 @@ export interface SandboxRunner {
     /** Generated files written over the extracted tree before any command. */
     overlayFiles?: readonly SandboxOverlayFile[];
   }): Promise<SandboxRunResult>;
+  prepareAndValidate(input: {
+    archive: ArrayBuffer;
+    archiveFormat: "zip" | "tar.gz";
+    dependencyFiles: readonly SandboxOverlayFile[];
+    installCommand: SandboxCommand;
+    validationCommands: readonly SandboxCommand[];
+    runId: string;
+    overlayFiles?: readonly SandboxOverlayFile[];
+  }): Promise<SandboxRunResult>;
 }
 
 const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_COMMANDS = 8;
 const MAX_RUNTIME_MS = 20 * 60 * 1_000;
+const MAX_PREPARED_DEPENDENCY_BYTES = 256 * 1024 * 1024;
 
 const INSTALL_COMMANDS = new Set([
   "npm ci --ignore-scripts",
@@ -116,6 +126,39 @@ function validateOverlay(files: readonly SandboxOverlayFile[]): void {
   }
 }
 
+function validateDependencyFiles(
+  files: readonly SandboxOverlayFile[],
+): void {
+  if (files.length === 0 || files.length > 500) {
+    throw new Error(
+      "Dependency preparation requires between 1 and 500 manifest or lockfiles.",
+    );
+  }
+  let total = 0;
+  for (const file of files) {
+    const path = normalizeRepositoryPath(file.path);
+    const name = path.split("/").at(-1)?.toLowerCase() ?? "";
+    if (
+      ![
+        "package.json",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "yarn.lock",
+      ].includes(name)
+    ) {
+      throw new Error(
+        "Only package manifests, workspace declarations, and public lockfiles may enter dependency preparation.",
+      );
+    }
+    total += new TextEncoder().encode(file.content).byteLength;
+  }
+  if (total > 10 * 1024 * 1024) {
+    throw new Error("Dependency preparation files exceed the 10 MiB limit.");
+  }
+}
+
 function registryCidrs(): string[] {
   return (process.env.E2B_REGISTRY_CIDRS ?? "")
     .split(",")
@@ -140,6 +183,74 @@ function infrastructureResult(
         ? error.message.slice(0, 500)
         : "Sandbox command failed before producing a result.",
   };
+}
+
+async function executeSandboxCommands(
+  sandbox: Sandbox,
+  workingDirectory: string,
+  commands: readonly SandboxCommand[],
+): Promise<SandboxCommandResult[]> {
+  const results: SandboxCommandResult[] = [];
+  for (let index = 0; index < commands.length; index += 1) {
+    const command = commands[index] as SandboxCommand;
+    const startedAt = Date.now();
+    const outputPath = `/tmp/autopilot-command-${index}.log`;
+    const wrapped = [
+      "ulimit -u 256",
+      "ulimit -f 131072",
+      `timeout 1200s sh -lc '${command.command}' > ${outputPath} 2>&1`,
+      "status=$?",
+      `head -c ${MAX_OUTPUT_BYTES} ${outputPath}`,
+      `size=$(wc -c < ${outputPath})`,
+      'printf "\\n__AUTOPILOT_OUTPUT_BYTES__%s\\n" "$size"',
+      "exit $status",
+    ].join("; ");
+    try {
+      const result = await sandbox.commands.run(wrapped, {
+        cwd: workingDirectory,
+        requestTimeoutMs: MAX_RUNTIME_MS,
+      });
+      const marker = result.stdout.match(
+        /\n__AUTOPILOT_OUTPUT_BYTES__(\d+)\s*$/,
+      );
+      const output = result.stdout.replace(
+        /\n__AUTOPILOT_OUTPUT_BYTES__\d+\s*$/,
+        "",
+      );
+      results.push({
+        category: command.category,
+        command: command.command,
+        status: "passed",
+        exitCode: 0,
+        durationMs: Date.now() - startedAt,
+        output,
+        truncated: Number(marker?.[1] ?? 0) > MAX_OUTPUT_BYTES,
+      });
+    } catch (error) {
+      if (error instanceof CommandExitError) {
+        const marker = error.stdout.match(
+          /\n__AUTOPILOT_OUTPUT_BYTES__(\d+)\s*$/,
+        );
+        const output = error.stdout.replace(
+          /\n__AUTOPILOT_OUTPUT_BYTES__\d+\s*$/,
+          "",
+        );
+        results.push({
+          category: command.category,
+          command: command.command,
+          status: "failed",
+          exitCode: error.exitCode,
+          durationMs: Date.now() - startedAt,
+          output,
+          truncated: Number(marker?.[1] ?? 0) > MAX_OUTPUT_BYTES,
+          ...(error.error ? { message: error.error.slice(0, 500) } : {}),
+        });
+      } else {
+        results.push(infrastructureResult(command, startedAt, error));
+      }
+    }
+  }
+  return results;
 }
 
 export class E2BSandboxRunner implements SandboxRunner {
@@ -234,65 +345,13 @@ export class E2BSandboxRunner implements SandboxRunner {
         );
       }
 
-      for (let index = 0; index < input.commands.length; index += 1) {
-        const command = input.commands[index] as SandboxCommand;
-        const startedAt = Date.now();
-        const outputPath = `/tmp/autopilot-command-${index}.log`;
-        const wrapped = [
-          "ulimit -u 256",
-          "ulimit -f 131072",
-          `timeout 1200s sh -lc '${command.command}' > ${outputPath} 2>&1`,
-          "status=$?",
-          `head -c ${MAX_OUTPUT_BYTES} ${outputPath}`,
-          `size=$(wc -c < ${outputPath})`,
-          'printf "\\n__AUTOPILOT_OUTPUT_BYTES__%s\\n" "$size"',
-          "exit $status",
-        ].join("; ");
-        try {
-          const result = await sandbox.commands.run(wrapped, {
-            cwd: workingDirectory,
-            requestTimeoutMs: MAX_RUNTIME_MS,
-          });
-          const marker = result.stdout.match(
-            /\n__AUTOPILOT_OUTPUT_BYTES__(\d+)\s*$/,
-          );
-          const output = result.stdout.replace(
-            /\n__AUTOPILOT_OUTPUT_BYTES__\d+\s*$/,
-            "",
-          );
-          results.push({
-            category: command.category,
-            command: command.command,
-            status: "passed",
-            exitCode: 0,
-            durationMs: Date.now() - startedAt,
-            output,
-            truncated: Number(marker?.[1] ?? 0) > MAX_OUTPUT_BYTES,
-          });
-        } catch (error) {
-          if (error instanceof CommandExitError) {
-            const marker = error.stdout.match(
-              /\n__AUTOPILOT_OUTPUT_BYTES__(\d+)\s*$/,
-            );
-            const output = error.stdout.replace(
-              /\n__AUTOPILOT_OUTPUT_BYTES__\d+\s*$/,
-              "",
-            );
-            results.push({
-              category: command.category,
-              command: command.command,
-              status: "failed",
-              exitCode: error.exitCode,
-              durationMs: Date.now() - startedAt,
-              output,
-              truncated: Number(marker?.[1] ?? 0) > MAX_OUTPUT_BYTES,
-              ...(error.error ? { message: error.error.slice(0, 500) } : {}),
-            });
-          } else {
-            results.push(infrastructureResult(command, startedAt, error));
-          }
-        }
-      }
+      results.push(
+        ...(await executeSandboxCommands(
+          sandbox,
+          workingDirectory,
+          input.commands,
+        )),
+      );
     } finally {
       await sandbox.kill();
       destroyed = true;
@@ -306,5 +365,199 @@ export class E2BSandboxRunner implements SandboxRunner {
       destroyed,
       ...(destroyedAt ? { destroyedAt } : {}),
     };
+  }
+
+  /**
+   * Installs public dependencies in a registry-only sandbox that receives only
+   * manifests/lockfiles, transfers an opaque prepared dependency archive
+   * through the trusted worker, then runs repository scripts in a fresh
+   * no-network sandbox. No GitHub or registry credential enters either stage.
+   */
+  async prepareAndValidate(input: {
+    archive: ArrayBuffer;
+    archiveFormat: "zip" | "tar.gz";
+    dependencyFiles: readonly SandboxOverlayFile[];
+    installCommand: SandboxCommand;
+    validationCommands: readonly SandboxCommand[];
+    runId: string;
+    overlayFiles?: readonly SandboxOverlayFile[];
+  }): Promise<SandboxRunResult> {
+    if (
+      input.archive.byteLength === 0 ||
+      input.archive.byteLength > MAX_ARCHIVE_BYTES
+    ) {
+      throw new Error("Sandbox archive must be between 1 byte and 100 MiB.");
+    }
+    validateCommand(input.installCommand, "dependency-preparation");
+    for (const command of input.validationCommands) {
+      validateCommand(command, "validation");
+    }
+    validateDependencyFiles(input.dependencyFiles);
+    if (input.overlayFiles) validateOverlay(input.overlayFiles);
+
+    const cidrs = registryCidrs();
+    if (cidrs.length === 0) {
+      const commands = [input.installCommand, ...input.validationCommands];
+      return {
+        sandboxId: "not-created",
+        phase: "prepare-and-validate",
+        destroyed: true,
+        destroyedAt: new Date().toISOString(),
+        results: commands.map((command) => ({
+          category: command.category,
+          command: command.command,
+          status: "incomplete",
+          durationMs: 0,
+          output: "",
+          truncated: false,
+          message:
+            "Registry egress CIDRs are not configured; dependency preparation was not started.",
+        })),
+      };
+    }
+
+    const apiKey = requireSecret("E2B_API_KEY");
+    const templateId = requireSecret("E2B_TEMPLATE_ID");
+    const preparation = await Sandbox.create(templateId, {
+      apiKey,
+      timeoutMs: MAX_RUNTIME_MS,
+      secure: true,
+      allowInternetAccess: true,
+      network: { allowOut: cidrs, allowPublicTraffic: false },
+      lifecycle: { onTimeout: "kill" },
+      metadata: {
+        product: "api-migration-autopilot",
+        phase: "dependency-preparation",
+        runId: input.runId.slice(0, 128),
+      },
+      envs: {},
+    });
+
+    let preparedArchive: Uint8Array;
+    let preparationResult: SandboxCommandResult;
+    try {
+      const preparationRoot = "/home/user/repository";
+      await preparation.files.makeDir(preparationRoot);
+      await preparation.files.write(
+        input.dependencyFiles.map((file) => ({
+          path: `${preparationRoot}/${normalizeRepositoryPath(file.path)}`,
+          data: file.content,
+        })),
+      );
+      preparationResult = (
+        await executeSandboxCommands(preparation, preparationRoot, [
+          input.installCommand,
+        ])
+      )[0] as SandboxCommandResult;
+      if (preparationResult.status !== "passed") {
+        return {
+          sandboxId: preparation.sandboxId,
+          phase: "prepare-and-validate",
+          destroyed: true,
+          destroyedAt: new Date().toISOString(),
+          results: [
+            {
+              ...preparationResult,
+              status: "incomplete",
+              message:
+                "Dependency preparation did not complete with public, lifecycle-script-disabled installation; repository validation was not started.",
+            },
+            ...input.validationCommands.map((command) => ({
+              category: command.category,
+              command: command.command,
+              status: "incomplete" as const,
+              durationMs: 0,
+              output: "",
+              truncated: false,
+              message:
+                "Validation was not run because dependency preparation was incomplete.",
+            })),
+          ],
+        };
+      }
+      await preparation.commands.run(
+        "tar -czf /tmp/autopilot-prepared-dependencies.tar.gz -C /home/user/repository .",
+        { requestTimeoutMs: 180_000 },
+      );
+      const info = await preparation.files.getInfo(
+        "/tmp/autopilot-prepared-dependencies.tar.gz",
+      );
+      if (
+        info.size <= 0 ||
+        info.size > MAX_PREPARED_DEPENDENCY_BYTES
+      ) {
+        throw new Error(
+          "Prepared dependencies exceed the 256 MiB transfer limit.",
+        );
+      }
+      preparedArchive = await preparation.files.read(
+        "/tmp/autopilot-prepared-dependencies.tar.gz",
+        { format: "bytes", requestTimeoutMs: 180_000 },
+      );
+    } finally {
+      await preparation.kill();
+    }
+
+    const validation = await Sandbox.create(templateId, {
+      apiKey,
+      timeoutMs: MAX_RUNTIME_MS,
+      secure: true,
+      allowInternetAccess: false,
+      network: {
+        denyOut: ["0.0.0.0/0", "::/0"],
+        allowPublicTraffic: false,
+      },
+      lifecycle: { onTimeout: "kill" },
+      metadata: {
+        product: "api-migration-autopilot",
+        phase: "offline-validation",
+        runId: input.runId.slice(0, 128),
+      },
+      envs: {},
+    });
+    let destroyedAt: string | undefined;
+    try {
+      const repositoryRoot = "/home/user/repository";
+      await validation.files.makeDir(repositoryRoot);
+      await validation.files.write(
+        "/home/user/prepared-dependencies.tar.gz",
+        Uint8Array.from(preparedArchive).buffer as ArrayBuffer,
+      );
+      const sourceArchive =
+        input.archiveFormat === "zip"
+          ? "/home/user/repository.zip"
+          : "/home/user/repository.tar.gz";
+      await validation.files.write(sourceArchive, input.archive);
+      const extractSource =
+        input.archiveFormat === "zip"
+          ? "rm -rf /tmp/autopilot-source && mkdir -p /tmp/autopilot-source && unzip -q /home/user/repository.zip -d /tmp/autopilot-source && source_root=$(find /tmp/autopilot-source -mindepth 1 -maxdepth 1 -type d -print -quit) && cp -a \"$source_root\"/. /home/user/repository/"
+          : "rm -rf /tmp/autopilot-source && mkdir -p /tmp/autopilot-source && tar -xzf /home/user/repository.tar.gz -C /tmp/autopilot-source && source_root=$(find /tmp/autopilot-source -mindepth 1 -maxdepth 1 -type d -print -quit) && cp -a \"$source_root\"/. /home/user/repository/";
+      await validation.commands.run(
+        `tar -xzf /home/user/prepared-dependencies.tar.gz -C ${repositoryRoot} && ${extractSource}`,
+        { requestTimeoutMs: 180_000 },
+      );
+      for (const file of input.overlayFiles ?? []) {
+        await validation.files.write(
+          `${repositoryRoot}/${normalizeRepositoryPath(file.path)}`,
+          file.content,
+        );
+      }
+      const validationResults = await executeSandboxCommands(
+        validation,
+        repositoryRoot,
+        input.validationCommands,
+      );
+      return {
+        sandboxId: validation.sandboxId,
+        phase: "prepare-and-validate",
+        results: [preparationResult, ...validationResults],
+        destroyed: true,
+        destroyedAt: new Date().toISOString(),
+      };
+    } finally {
+      await validation.kill();
+      destroyedAt = new Date().toISOString();
+      void destroyedAt;
+    }
   }
 }

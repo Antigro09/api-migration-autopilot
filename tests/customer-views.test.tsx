@@ -30,7 +30,17 @@ function review(overrides?: Partial<PatchReviewData>): PatchReviewData {
         additions: 1,
         deletions: 1,
         ruleIds: ["stripe.constructor.new"],
+        transformations: ["deterministic_codemod"],
         rationale: ["Instantiate the v22 ES class export with new."],
+        evidence: [
+          {
+            ruleId: "stripe.constructor.new",
+            classification: "affected",
+            confidence: 0.99,
+            sources: ["Stripe Node changelog — v22 constructor migration"],
+          },
+        ],
+        knownLimitations: ["Dynamic imports require manual review."],
       },
     ],
     selectedPath: "src/billing.ts",

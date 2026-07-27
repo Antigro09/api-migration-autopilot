@@ -1,7 +1,16 @@
 import { getD1 } from "@/db";
 import { ensureDatabaseSchema } from "@/db/runtime";
-import type { JsonObject, RunManifestV1, RunStage } from "@/lib/domain";
-import { MODEL_CONSENT_POLICY_VERSION } from "@/lib/domain";
+import type {
+  JsonObject,
+  MigrationSpecV1,
+  RunManifestV1,
+  RunStage,
+} from "@/lib/domain";
+import {
+  MODEL_CONSENT_POLICY_VERSION,
+  parseMigrationSpecV1,
+  parseRunManifestV1,
+} from "@/lib/domain";
 import { createFileDiff, type FileDiff } from "@/lib/migration/diff";
 import { activeConsent } from "./consent";
 import { loadPatchRecord, readPersistedPatch } from "./publication";
@@ -27,6 +36,7 @@ export type CustomerMigrationSummary = {
   status: "no-impact" | "impact-found" | "partial-coverage";
   findingCount: number;
   scannedFiles: number;
+  scannedPaths: string[];
   skipped: Array<{ path: string; reason: string }>;
   dependency: {
     packageName: string;
@@ -67,7 +77,7 @@ export type CustomerFinding = {
     column: number;
   };
   autoPatchEligible: boolean;
-  evidence: Array<{ title: string; url: string }>;
+  evidence: Array<{ title: string; url?: string }>;
 };
 
 export type CustomerWorkspaceData = {
@@ -103,13 +113,19 @@ function parseAssessmentSummary(value: string | null): CustomerMigrationSummary 
       ) ||
       !Number.isInteger(parsed.findingCount) ||
       !Number.isInteger(parsed.scannedFiles) ||
+      (parsed.scannedPaths !== undefined &&
+        (!Array.isArray(parsed.scannedPaths) ||
+          !parsed.scannedPaths.every((path) => typeof path === "string"))) ||
       !Array.isArray(parsed.skipped) ||
       !parsed.dependency ||
       typeof parsed.dependency.packageName !== "string"
     ) {
       return null;
     }
-    return parsed;
+    return {
+      ...parsed,
+      scannedPaths: parsed.scannedPaths ?? [],
+    };
   } catch {
     return null;
   }
@@ -136,12 +152,13 @@ function parseFinding(input: FindingRow): CustomerFinding | null {
     }
     const evidence = details.evidence
       .filter(
-        (entry): entry is { title: string; url: string } =>
+        (entry): entry is { title: string; url?: string } =>
           Boolean(
             entry &&
               typeof entry === "object" &&
               typeof (entry as { title?: unknown }).title === "string" &&
-              typeof (entry as { url?: unknown }).url === "string",
+              ((entry as { url?: unknown }).url === undefined ||
+                typeof (entry as { url?: unknown }).url === "string"),
           ),
       )
       .slice(0, 20);
@@ -337,7 +354,17 @@ export type PatchReviewFile = {
   additions: number;
   deletions: number;
   ruleIds: string[];
+  transformations: Array<
+    "deterministic_codemod" | "parameterized_template" | "model_residual"
+  >;
   rationale: string[];
+  evidence: Array<{
+    ruleId: string;
+    classification: "affected" | "not_affected" | "uncertain" | "unsupported";
+    confidence: number;
+    sources: string[];
+  }>;
+  knownLimitations: string[];
 };
 
 export type PatchReviewValidation = {
@@ -410,13 +437,15 @@ export async function customerPatchReview(
         mr.base_sha AS baseSha,
         mr.approved_patch_sha256 AS approvedPatchSha256,
         mr.approved_at AS approvedAt,
-        mr.manifest
+        mr.manifest,
+        ms.content AS specContent
        FROM repository_migrations rm
        JOIN repositories r ON r.id = rm.repository_id
        JOIN campaigns c ON c.id = rm.campaign_id
        JOIN organizations po ON po.id = c.organization_id
        JOIN migration_runs mr ON mr.repository_migration_id = rm.id
          AND mr.kind = 'patch'
+       JOIN migration_specs ms ON ms.id = mr.migration_spec_id
        WHERE rm.id = ? AND rm.organization_id = ?
        ORDER BY mr.created_at DESC
        LIMIT 1`,
@@ -435,6 +464,7 @@ export async function customerPatchReview(
       approvedPatchSha256: string | null;
       approvedAt: string | null;
       manifest: string | null;
+      specContent: string | MigrationSpecV1;
     }>();
   if (!context) return null;
 
@@ -446,22 +476,71 @@ export async function customerPatchReview(
   }
 
   let manifest: RunManifestV1 | null = null;
+  let spec: MigrationSpecV1 | null = null;
   try {
     manifest = context.manifest
-      ? (JSON.parse(context.manifest) as RunManifestV1)
+      ? parseRunManifestV1(JSON.parse(context.manifest))
       : null;
   } catch {
     manifest = null;
   }
+  try {
+    spec = parseMigrationSpecV1(
+      typeof context.specContent === "string"
+        ? JSON.parse(context.specContent)
+        : context.specContent,
+    );
+  } catch {
+    spec = null;
+  }
 
-  const editsByPath = new Map<string, { ruleIds: string[]; rationale: string[] }>();
+  const editsByPath = new Map<
+    string,
+    {
+      ruleIds: string[];
+      transformations: PatchReviewFile["transformations"];
+      rationale: string[];
+    }
+  >();
   for (const edit of manifest?.edits ?? []) {
-    const entry = editsByPath.get(edit.filePath) ?? { ruleIds: [], rationale: [] };
+    const entry = editsByPath.get(edit.filePath) ?? {
+      ruleIds: [],
+      transformations: [],
+      rationale: [],
+    };
     if (!entry.ruleIds.includes(edit.ruleId)) entry.ruleIds.push(edit.ruleId);
+    if (!entry.transformations.includes(edit.transformation)) {
+      entry.transformations.push(edit.transformation);
+    }
     if (!entry.rationale.includes(edit.rationale)) {
       entry.rationale.push(edit.rationale);
     }
     editsByPath.set(edit.filePath, entry);
+  }
+  const changesByRuleId = new Map(
+    (spec?.changes ?? []).map((change) => [change.id, change]),
+  );
+  const sourceTitles = new Map(
+    (spec?.sourceArtifacts ?? []).map((artifact) => [artifact.id, artifact.title]),
+  );
+  const evidenceByPath = new Map<string, PatchReviewFile["evidence"]>();
+  for (const finding of manifest?.findings ?? []) {
+    const change = changesByRuleId.get(finding.ruleId);
+    const citedIds = new Set(finding.citationArtifactIds);
+    const sources = (change?.citations ?? [])
+      .filter((citation) => citedIds.has(citation.artifactId))
+      .map((citation) => {
+        const title = sourceTitles.get(citation.artifactId) ?? "Provider artifact";
+        return citation.locator ? `${title} — ${citation.locator}` : title;
+      });
+    const entry = evidenceByPath.get(finding.filePath) ?? [];
+    entry.push({
+      ruleId: finding.ruleId,
+      classification: finding.classification,
+      confidence: finding.confidence,
+      sources,
+    });
+    evidenceByPath.set(finding.filePath, entry);
   }
 
   const validationRows = await database
@@ -510,7 +589,16 @@ export async function customerPatchReview(
         additions: diff.additions,
         deletions: diff.deletions,
         ruleIds: editsByPath.get(file.path)?.ruleIds ?? [...file.ruleIds],
+        transformations: editsByPath.get(file.path)?.transformations ?? [],
         rationale: editsByPath.get(file.path)?.rationale ?? [...file.rationale],
+        evidence: evidenceByPath.get(file.path) ?? [],
+        knownLimitations: [
+          ...new Set(
+            (editsByPath.get(file.path)?.ruleIds ?? file.ruleIds).flatMap(
+              (ruleId) => changesByRuleId.get(ruleId)?.knownLimitations ?? [],
+            ),
+          ),
+        ],
       };
     });
     const chosen =

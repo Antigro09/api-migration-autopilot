@@ -1,5 +1,7 @@
 import { getD1 } from "@/db";
 import { ensureDatabaseSchema } from "@/db/runtime";
+import type { TenantContext } from "@/lib/domain";
+import { DomainError } from "@/lib/domain/errors";
 import { R2ArtifactStore } from "@/lib/platform/artifacts";
 import { appendAuditEvent } from "./control-plane";
 
@@ -137,7 +139,8 @@ async function sweepInterruptedRuns(now: Date): Promise<number> {
         id,
         organization_id AS organizationId,
         repository_migration_id AS repositoryMigrationId,
-        state
+        state,
+        kind
        FROM migration_runs
        WHERE state IN (${placeholders}) AND updated_at < ?
        ORDER BY updated_at ASC
@@ -149,11 +152,18 @@ async function sweepInterruptedRuns(now: Date): Promise<number> {
       organizationId: string;
       repositoryMigrationId: string;
       state: string;
+      kind: "assessment" | "patch" | "verification";
     }>();
 
   const timestamp = now.toISOString();
   const hardDeadlineAt = timestamp;
   for (const run of stale.results) {
+    const recoveryState =
+      run.kind === "patch"
+        ? "patcher_required"
+        : run.kind === "verification"
+          ? "merged"
+          : "scanner_connected";
     await database.batch([
       database
         .prepare(
@@ -167,10 +177,16 @@ async function sweepInterruptedRuns(now: Date): Promise<number> {
       database
         .prepare(
           `UPDATE repository_migrations
-           SET last_failure_category = 'infrastructure', updated_at = ?
+           SET state = ?, last_failure_category = 'infrastructure',
+               updated_at = ?
            WHERE id = ? AND organization_id = ?`,
         )
-        .bind(timestamp, run.repositoryMigrationId, run.organizationId),
+        .bind(
+          recoveryState,
+          timestamp,
+          run.repositoryMigrationId,
+          run.organizationId,
+        ),
     ]);
     await enqueueRunArtifactDeletion({
       organizationId: run.organizationId,
@@ -253,6 +269,15 @@ async function processDeletionQueue(
   const timestamp = now.toISOString();
 
   for (const job of jobs.results) {
+    const claim = await database
+      .prepare(
+        `UPDATE deletion_jobs
+         SET status = 'running', updated_at = ?
+         WHERE id = ? AND status = 'pending' AND next_attempt_at <= ?`,
+      )
+      .bind(timestamp, job.id, timestamp)
+      .run();
+    if (claim.meta.changes === 0) continue;
     const attempt = job.attemptCount + 1;
     try {
       await store.delete(job.organizationId, job.storageKey);
@@ -322,8 +347,8 @@ async function processDeletionQueue(
         await database
           .prepare(
             `UPDATE deletion_jobs
-             SET attempt_count = ?, last_error_code = ?, next_attempt_at = ?,
-                 updated_at = ?
+             SET status = 'pending', attempt_count = ?,
+                 last_error_code = ?, next_attempt_at = ?, updated_at = ?
              WHERE id = ?`,
           )
           .bind(
@@ -362,30 +387,217 @@ export type CustomerDeletionRequest = {
   queuedArtifacts: number;
 };
 
+function assertCustomerDataActor(tenant: TenantContext): void {
+  if (tenant.organizationKind !== "customer") {
+    throw new DomainError(
+      "FORBIDDEN",
+      "Customer retention data is available only to the owning customer organization.",
+    );
+  }
+}
+
+/**
+ * Portable, customer-owned export of persisted migration state. It includes
+ * manifests and retention evidence but not credentials or source belonging to
+ * any other tenant. Expired/deleted artifact bodies are intentionally absent.
+ */
+export async function customerMigrationExport(input: {
+  tenant: TenantContext;
+  repositoryMigrationId: string;
+}): Promise<Record<string, unknown>> {
+  await ensureDatabaseSchema();
+  assertCustomerDataActor(input.tenant);
+  const database = getD1();
+  const migration = await database
+    .prepare(
+      `SELECT
+         rm.id,
+         rm.state,
+         rm.dependency_version AS dependencyVersion,
+         rm.assessment_summary AS assessmentSummary,
+         rm.verified_at AS verifiedAt,
+         rm.closed_at AS closedAt,
+         r.owner AS repositoryOwner,
+         r.name AS repositoryName,
+         c.name AS campaignName,
+         c.package_name AS packageName,
+         c.source_range AS sourceRange,
+         c.target_version AS targetVersion
+       FROM repository_migrations rm
+       JOIN repositories r ON r.id = rm.repository_id
+       JOIN campaigns c ON c.id = rm.campaign_id
+       WHERE rm.id = ? AND rm.organization_id = ?
+       LIMIT 1`,
+    )
+    .bind(input.repositoryMigrationId, input.tenant.organizationId)
+    .first<Record<string, unknown>>();
+  if (!migration) {
+    throw new DomainError(
+      "NOT_FOUND",
+      "The repository migration was not found in this organization.",
+    );
+  }
+
+  const [runs, consents, artifacts, deletionJobs] = await Promise.all([
+    database
+      .prepare(
+        `SELECT
+           id, kind, state, base_sha AS baseSha,
+           patch_sha256 AS patchSha256,
+           approved_patch_sha256 AS approvedPatchSha256,
+           approved_by_membership_id AS approvedByMembershipId,
+           approved_at AS approvedAt,
+           failure_category AS failureCategory,
+           failure_code AS failureCode,
+           manifest, manifest_sha256 AS manifestSha256,
+           merge_commit_sha AS mergeCommitSha,
+           verification_run_id AS verificationRunId,
+           cost_micro_usd AS costMicroUsd,
+           created_at AS createdAt, started_at AS startedAt,
+           completed_at AS completedAt, updated_at AS updatedAt
+         FROM migration_runs
+         WHERE organization_id = ? AND repository_migration_id = ?
+         ORDER BY created_at ASC`,
+      )
+      .bind(input.tenant.organizationId, input.repositoryMigrationId)
+      .all<Record<string, unknown>>(),
+    database
+      .prepare(
+        `SELECT
+           id, kind, policy_version AS policyVersion,
+           membership_id AS membershipId, granted_at AS grantedAt,
+           revoked_at AS revokedAt
+         FROM consents
+         WHERE organization_id = ? AND repository_migration_id = ?
+         ORDER BY granted_at ASC`,
+      )
+      .bind(input.tenant.organizationId, input.repositoryMigrationId)
+      .all<Record<string, unknown>>(),
+    database
+      .prepare(
+        `SELECT
+           a.id, a.run_id AS runId, a.kind, a.sha256,
+           a.size_bytes AS sizeBytes, a.lifecycle_state AS lifecycleState,
+           a.expires_at AS expiresAt, a.deleted_at AS deletedAt,
+           a.deletion_verified_at AS deletionVerifiedAt,
+           a.created_at AS createdAt
+         FROM artifacts a
+         JOIN migration_runs mr ON mr.id = a.run_id
+         WHERE a.organization_id = ? AND mr.repository_migration_id = ?
+         ORDER BY a.created_at ASC`,
+      )
+      .bind(input.tenant.organizationId, input.repositoryMigrationId)
+      .all<Record<string, unknown>>(),
+    database
+      .prepare(
+        `SELECT
+           dj.id, dj.artifact_id AS artifactId, dj.status, dj.reason,
+           dj.hard_deadline_at AS hardDeadlineAt,
+           dj.attempt_count AS attemptCount,
+           dj.last_error_code AS lastErrorCode,
+           dj.completed_at AS completedAt
+         FROM deletion_jobs dj
+         JOIN artifacts a ON a.id = dj.artifact_id
+         JOIN migration_runs mr ON mr.id = a.run_id
+         WHERE dj.organization_id = ? AND mr.repository_migration_id = ?
+         ORDER BY dj.created_at ASC`,
+      )
+      .bind(input.tenant.organizationId, input.repositoryMigrationId)
+      .all<Record<string, unknown>>(),
+  ]);
+
+  const aggregateIds = [
+    input.repositoryMigrationId,
+    ...runs.results.map((row) => String(row.id)),
+    ...artifacts.results.map((row) => String(row.id)),
+  ];
+  const placeholders = aggregateIds.map(() => "?").join(", ");
+  const auditEvents = await database
+    .prepare(
+      `SELECT
+         id, aggregate_type AS aggregateType, aggregate_id AS aggregateId,
+         sequence, action, actor_membership_id AS actorMembershipId,
+         payload, previous_hash AS previousHash, event_hash AS eventHash,
+         occurred_at AS occurredAt
+       FROM audit_events
+       WHERE organization_id = ? AND aggregate_id IN (${placeholders})
+       ORDER BY occurred_at ASC
+       LIMIT 5000`,
+    )
+    .bind(input.tenant.organizationId, ...aggregateIds)
+    .all<Record<string, unknown>>();
+
+  await appendAuditEvent({
+    organizationId: input.tenant.organizationId,
+    aggregateType: "repository_migration",
+    aggregateId: input.repositoryMigrationId,
+    action: "retention.customer_exported",
+    actorMembershipId: input.tenant.membershipId,
+    payload: {
+      runCount: runs.results.length,
+      artifactCount: artifacts.results.length,
+    },
+  });
+
+  return {
+    schemaVersion: "customer-migration-export/1",
+    generatedAt: new Date().toISOString(),
+    organizationId: input.tenant.organizationId,
+    migration,
+    runs: runs.results,
+    consents: consents.results,
+    artifacts: artifacts.results,
+    deletionJobs: deletionJobs.results,
+    auditEvents: auditEvents.results,
+  };
+}
+
 /**
  * Customer-initiated erasure: every source-derived artifact for a repository
  * migration is queued immediately, ahead of its normal retention window.
  */
 export async function requestCustomerErasure(input: {
-  organizationId: string;
+  tenant: TenantContext;
   repositoryMigrationId: string;
-  actorMembershipId: string;
 }): Promise<CustomerDeletionRequest> {
   await ensureDatabaseSchema();
+  if (
+    input.tenant.organizationKind !== "customer" ||
+    !["admin", "approver"].includes(input.tenant.role)
+  ) {
+    throw new DomainError(
+      "FORBIDDEN",
+      "Only a customer admin or approver can request early erasure.",
+    );
+  }
+  const migration = await getD1()
+    .prepare(
+      `SELECT id FROM repository_migrations
+       WHERE id = ? AND organization_id = ?
+       LIMIT 1`,
+    )
+    .bind(input.repositoryMigrationId, input.tenant.organizationId)
+    .first<{ id: string }>();
+  if (!migration) {
+    throw new DomainError(
+      "NOT_FOUND",
+      "The repository migration was not found in this organization.",
+    );
+  }
   const runs = await getD1()
     .prepare(
       `SELECT id
        FROM migration_runs
        WHERE organization_id = ? AND repository_migration_id = ?`,
     )
-    .bind(input.organizationId, input.repositoryMigrationId)
+    .bind(input.tenant.organizationId, input.repositoryMigrationId)
     .all<{ id: string }>();
 
   const now = new Date();
   let queuedArtifacts = 0;
   for (const run of runs.results) {
     queuedArtifacts += await enqueueRunArtifactDeletion({
-      organizationId: input.organizationId,
+      organizationId: input.tenant.organizationId,
       runId: run.id,
       reason: "customer_request",
       hardDeadlineAt: now.toISOString(),
@@ -393,11 +605,11 @@ export async function requestCustomerErasure(input: {
     });
   }
   await appendAuditEvent({
-    organizationId: input.organizationId,
+    organizationId: input.tenant.organizationId,
     aggregateType: "repository_migration",
     aggregateId: input.repositoryMigrationId,
     action: "retention.customer_erasure_requested",
-    actorMembershipId: input.actorMembershipId,
+    actorMembershipId: input.tenant.membershipId,
     payload: { queuedArtifacts, runCount: runs.results.length },
   });
   return { queuedArtifacts };

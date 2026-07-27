@@ -92,12 +92,15 @@ export async function handleGitHubWebhook(
       });
     }
     if (
+      appKind === "patcher" &&
       eventName === "pull_request" &&
+      installationId &&
       typeof payload.repository?.id === "number" &&
       typeof payload.pull_request?.number === "number" &&
       typeof payload.pull_request.head?.ref === "string"
     ) {
       await applyPullRequestLifecycle({
+        installationId,
         repositoryId: String(payload.repository.id),
         pullRequestNumber: payload.pull_request.number,
         headBranch: payload.pull_request.head.ref,

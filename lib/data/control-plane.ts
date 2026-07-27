@@ -17,6 +17,7 @@ export type Workspace = {
   kind: OrganizationKind;
   role: OrganizationRole;
   verifiedDomain: string | null;
+  providerBrandingApprovedAt: string | null;
 };
 
 export type CampaignRecord = {
@@ -33,6 +34,7 @@ export type CampaignRecord = {
   status: CampaignState;
   independentReference: boolean;
   currentSpecId: string | null;
+  consentedCustomerCount: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -186,7 +188,8 @@ export async function listWorkspaces(actorId: string): Promise<Workspace[]> {
         o.name,
         o.kind,
         m.role,
-        o.verified_domain AS verifiedDomain
+        o.verified_domain AS verifiedDomain,
+        o.provider_branding_approved_at AS providerBrandingApprovedAt
       FROM memberships m
       JOIN organizations o ON o.id = m.organization_id
       WHERE m.workos_user_id = ? AND m.status = 'active'
@@ -269,6 +272,7 @@ export async function bootstrapOrganization(input: {
     kind: input.kind,
     role: "admin",
     verifiedDomain: null,
+    providerBrandingApprovedAt: null,
   };
 }
 
@@ -425,7 +429,13 @@ export async function getCampaign(
         independent_reference AS independentReference,
         current_spec_id AS currentSpecId,
         created_at AS createdAt,
-        updated_at AS updatedAt
+        updated_at AS updatedAt,
+        (
+          SELECT COUNT(*) FROM campaign_participants cp
+          WHERE cp.campaign_id = campaigns.id
+            AND cp.provider_organization_id = campaigns.organization_id
+            AND cp.share_lifecycle_with_provider = true
+        ) AS consentedCustomerCount
       FROM campaigns
       WHERE organization_id = ? AND id = ?
       LIMIT 1`,
@@ -455,7 +465,13 @@ export async function listCampaigns(
         independent_reference AS independentReference,
         current_spec_id AS currentSpecId,
         created_at AS createdAt,
-        updated_at AS updatedAt
+        updated_at AS updatedAt,
+        (
+          SELECT COUNT(*) FROM campaign_participants cp
+          WHERE cp.campaign_id = campaigns.id
+            AND cp.provider_organization_id = campaigns.organization_id
+            AND cp.share_lifecycle_with_provider = true
+        ) AS consentedCustomerCount
       FROM campaigns
       WHERE organization_id = ?
       ORDER BY created_at DESC`,
@@ -465,6 +481,7 @@ export async function listCampaigns(
   return result.results.map((campaign) => ({
     ...campaign,
     independentReference: Boolean(campaign.independentReference),
+    consentedCustomerCount: Number(campaign.consentedCustomerCount ?? 0),
   }));
 }
 

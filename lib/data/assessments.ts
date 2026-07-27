@@ -1,12 +1,17 @@
 import { getD1 } from "@/db";
 import { ensureDatabaseSchema } from "@/db/runtime";
-import { type TenantContext } from "@/lib/domain";
+import {
+  parseMigrationSpecV1,
+  type MigrationSpecV1,
+  type TenantContext,
+} from "@/lib/domain";
 import { DomainError } from "@/lib/domain/errors";
 import { GitHubAppGateway } from "@/lib/integrations/github";
 import type { MigrationAssessment } from "@/lib/migration/contracts";
 import { normalizeRepositoryPath } from "@/lib/migration/patch-security";
 import { publicAppUrl } from "@/lib/platform/config";
 import { TriggerWorkflowEngine } from "@/lib/workflows/engine";
+import { storeRunArtifact } from "./artifacts";
 import { appendAuditEvent } from "./control-plane";
 
 export type AssessmentWorkPacket = {
@@ -22,7 +27,23 @@ export type AssessmentWorkPacket = {
   specId: string;
   specRevision: number;
   packageName: string;
+  spec: MigrationSpecV1;
   alreadyCompleted: boolean;
+};
+
+export type AssessmentExecutionEvidence = {
+  analyzerVersion: string;
+  sandboxId: string;
+  sandboxImageVersion: string;
+  network: "none";
+  sandboxDestroyedAt: string;
+  sourceDeletedAt: string;
+  model?: {
+    model: string;
+    responseId: string;
+    inputTokens: number;
+    outputTokens: number;
+  };
 };
 
 function id(prefix: string): string {
@@ -115,13 +136,6 @@ export async function requestAssessment(input: {
       "The campaign, specification, and Scanner App must be active.",
     );
   }
-  if (context.packageName !== "stripe") {
-    throw new DomainError(
-      "VALIDATION_FAILED",
-      "The production alpha assessment engine currently supports the stripe package.",
-    );
-  }
-
   const gateway = new GitHubAppGateway();
   const baseSha = await gateway.getBranchSha({
     appKind: "scanner",
@@ -309,18 +323,27 @@ export async function assessmentWorkPacket(
         mr.campaign_id AS campaignId,
         mr.migration_spec_id AS specId,
         mr.migration_spec_revision AS specRevision,
-        c.package_name AS packageName
+        c.package_name AS packageName,
+        ms.content AS specContent
        FROM migration_runs mr
        JOIN repositories r ON r.id = mr.repository_id
        JOIN github_installations gi ON gi.id = r.scanner_installation_id
        JOIN campaigns c ON c.id = mr.campaign_id
+       JOIN migration_specs ms ON ms.id = mr.migration_spec_id
        WHERE mr.id = ?
          AND mr.state IN ('queued', 'acquiring_source', 'analyzing', 'cleaned')
        LIMIT 1`,
     )
     .bind(runId)
-    .first<AssessmentWorkPacket>();
+    .first<Omit<AssessmentWorkPacket, "spec" | "alreadyCompleted"> & {
+      specContent: string | MigrationSpecV1;
+    }>();
   if (!packet) return null;
+  const spec = parseMigrationSpecV1(
+    typeof packet.specContent === "string"
+      ? JSON.parse(packet.specContent)
+      : packet.specContent,
+  );
   const runState = await getD1()
     .prepare("SELECT state FROM migration_runs WHERE id = ? LIMIT 1")
     .bind(runId)
@@ -333,7 +356,22 @@ export async function assessmentWorkPacket(
     )
     .bind(new Date().toISOString(), new Date().toISOString(), runId)
     .run();
-  return { ...packet, alreadyCompleted: runState?.state === "cleaned" };
+  return {
+    runId: packet.runId,
+    organizationId: packet.organizationId,
+    repositoryMigrationId: packet.repositoryMigrationId,
+    githubInstallationId: packet.githubInstallationId,
+    githubRepositoryId: packet.githubRepositoryId,
+    owner: packet.owner,
+    repository: packet.repository,
+    baseSha: packet.baseSha,
+    campaignId: packet.campaignId,
+    specId: packet.specId,
+    specRevision: packet.specRevision,
+    packageName: packet.packageName,
+    spec,
+    alreadyCompleted: runState?.state === "cleaned",
+  };
 }
 
 function confidence(value: string): number {
@@ -347,6 +385,7 @@ export async function completeAssessment(input: {
   runId: string;
   assessment: MigrationAssessment;
   skipped: Array<{ path: string; reason: string }>;
+  execution: AssessmentExecutionEvidence;
 }): Promise<void> {
   await ensureDatabaseSchema();
   if (input.assessment.findings.length > 10_000) {
@@ -364,6 +403,7 @@ export async function completeAssessment(input: {
         mr.campaign_id AS campaignId,
         mr.migration_spec_id AS specId,
         mr.migration_spec_revision AS specRevision,
+        mr.base_sha AS baseSha,
         mr.kind,
         rm.campaign_participant_id AS participantId
        FROM migration_runs mr
@@ -378,6 +418,7 @@ export async function completeAssessment(input: {
       campaignId: string;
       specId: string;
       specRevision: number;
+      baseSha: string;
       kind: string;
       participantId: string;
     }>();
@@ -388,8 +429,8 @@ export async function completeAssessment(input: {
     );
   }
   if (
-    input.assessment.specId !== "reference.stripe-node.20-to-22" ||
-    input.assessment.specRevision !== 1
+    input.assessment.specId !== run.specId ||
+    input.assessment.specRevision !== run.specRevision
   ) {
     throw new DomainError(
       "VALIDATION_FAILED",
@@ -427,6 +468,55 @@ export async function completeAssessment(input: {
         ? "impact_found"
         : "partial_coverage";
   const now = new Date().toISOString();
+  const assessmentManifest = {
+    schemaVersion: "2",
+    kind: "assessment",
+    runId: input.runId,
+    organizationId: run.organizationId,
+    repositoryMigrationId: run.repositoryMigrationId,
+    campaignId: run.campaignId,
+    migrationSpecId: run.specId,
+    migrationSpecRevision: run.specRevision,
+    baseSha: run.baseSha,
+    versions: {
+      analyzer: input.execution.analyzerVersion,
+      sandboxImage: input.execution.sandboxImageVersion,
+      ...(input.execution.model
+        ? { model: input.execution.model.model }
+        : {}),
+    },
+    scope: {
+      scannedFiles: input.assessment.scannedFiles.length,
+      skippedEntries: allSkipped.length,
+      findings: input.assessment.findings.length,
+      status,
+    },
+    executionPolicy: {
+      network: input.execution.network,
+      secrets: [],
+      repositoryCodeExecuted: false,
+    },
+    sandbox: {
+      id: input.execution.sandboxId,
+      destroyedAt: input.execution.sandboxDestroyedAt,
+    },
+    ...(input.execution.model ? { model: input.execution.model } : {}),
+    cleanup: {
+      sourceDeletedAt: input.execution.sourceDeletedAt,
+      sandboxDestroyedAt: input.execution.sandboxDestroyedAt,
+      complete: true,
+    },
+    completedAt: now,
+  } as const;
+  const manifestArtifact = await storeRunArtifact({
+    organizationId: run.organizationId,
+    runId: input.runId,
+    campaignId: run.campaignId,
+    kind: "run_manifest",
+    storageKey: `runs/${input.runId}/assessment-manifest-v2.json.enc`,
+    plaintext: JSON.stringify(assessmentManifest),
+    contentType: "application/json",
+  });
   const statements = input.assessment.findings.map((finding) => {
     const path = normalizeRepositoryPath(finding.path);
     return database
@@ -454,7 +544,7 @@ export async function completeAssessment(input: {
           autoPatchEligible: finding.autoPatchEligible,
           evidence: finding.evidence.map((citation) => ({
             title: citation.title,
-            url: citation.url,
+            ...(citation.url ? { url: citation.url } : {}),
           })),
         }),
       );
@@ -475,6 +565,7 @@ export async function completeAssessment(input: {
           dependency: input.assessment.dependency,
           findingCount: input.assessment.findings.length,
           scannedFiles: input.assessment.scannedFiles.length,
+          scannedPaths: input.assessment.scannedFiles.slice(0, 2_000),
           skipped: allSkipped,
         }),
         migrationState === "verified" ? now : null,
@@ -485,11 +576,18 @@ export async function completeAssessment(input: {
     database
       .prepare(
         `UPDATE migration_runs
-         SET state = ?, completed_at = ?, updated_at = ?
+         SET state = ?, manifest = ?, completed_at = ?, updated_at = ?
          WHERE id = ? AND organization_id = ? AND state = 'analyzing'`,
       )
       .bind(
         verification && migrationState === "verified" ? "verified" : "cleaned",
+        JSON.stringify({
+          ...assessmentManifest,
+          artifact: {
+            id: manifestArtifact.id,
+            sha256: manifestArtifact.sha256,
+          },
+        }),
         now,
         now,
         input.runId,
@@ -524,6 +622,9 @@ export async function completeAssessment(input: {
       scannedFileCount: input.assessment.scannedFiles.length,
       skippedCount: allSkipped.length,
       sourceRetained: false,
+      analyzerVersion: input.execution.analyzerVersion,
+      sandboxImageVersion: input.execution.sandboxImageVersion,
+      assessmentManifestSha256: manifestArtifact.sha256,
     },
   });
 }
@@ -621,40 +722,66 @@ export async function enqueueVerificationScan(input: {
 
   const runId = id("run");
   const now = new Date().toISOString();
-  await database.batch([
-    database
-      .prepare(
-        `INSERT INTO migration_runs (
-          id, organization_id, repository_migration_id, repository_id,
-          campaign_id, migration_spec_id, migration_spec_revision,
-          state, base_sha, kind, merge_commit_sha
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, 'verification', ?)`,
-      )
-      .bind(
-        runId,
-        input.organizationId,
-        context.migrationId,
-        context.repositoryId,
-        context.campaignId,
-        context.specId,
-        context.specRevision,
-        input.mergeCommitSha.toLowerCase(),
-        input.mergeCommitSha.toLowerCase(),
-      ),
-    database
+  // Atomically claim the merged migration before creating a verification run.
+  // This closes the race between distinct-but-equivalent GitHub webhook
+  // deliveries without relying only on delivery-id deduplication.
+  const claim = await database
+    .prepare(
+      `UPDATE repository_migrations
+       SET state = 'assessing', latest_run_id = ?, updated_at = ?
+       WHERE id = ? AND organization_id = ? AND state = 'merged'`,
+    )
+    .bind(runId, now, context.migrationId, input.organizationId)
+    .run();
+  if (claim.meta.changes === 0) return null;
+
+  try {
+    await database.batch([
+      database
+        .prepare(
+          `INSERT INTO migration_runs (
+            id, organization_id, repository_migration_id, repository_id,
+            campaign_id, migration_spec_id, migration_spec_revision,
+            state, base_sha, kind, merge_commit_sha
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, 'verification', ?)`,
+        )
+        .bind(
+          runId,
+          input.organizationId,
+          context.migrationId,
+          context.repositoryId,
+          context.campaignId,
+          context.specId,
+          context.specRevision,
+          input.mergeCommitSha.toLowerCase(),
+          input.mergeCommitSha.toLowerCase(),
+        ),
+      database
+        .prepare(
+          `UPDATE migration_runs SET verification_run_id = ?, updated_at = ?
+           WHERE id = ? AND organization_id = ?
+             AND verification_run_id IS NULL`,
+        )
+        .bind(runId, now, input.mergedRunId, input.organizationId),
+    ]);
+  } catch (error) {
+    await database
       .prepare(
         `UPDATE repository_migrations
-         SET state = 'assessing', latest_run_id = ?, updated_at = ?
-         WHERE id = ? AND organization_id = ? AND state = 'merged'`,
+         SET state = 'merged', latest_run_id = ?, updated_at = ?
+         WHERE id = ? AND organization_id = ? AND state = 'assessing'
+           AND latest_run_id = ?`,
       )
-      .bind(runId, now, context.migrationId, input.organizationId),
-    database
-      .prepare(
-        `UPDATE migration_runs SET verification_run_id = ?, updated_at = ?
-         WHERE id = ? AND organization_id = ?`,
+      .bind(
+        input.mergedRunId,
+        new Date().toISOString(),
+        context.migrationId,
+        input.organizationId,
+        runId,
       )
-      .bind(runId, now, input.mergedRunId, input.organizationId),
-  ]);
+      .run();
+    throw error;
+  }
 
   await appendAuditEvent({
     organizationId: input.organizationId,

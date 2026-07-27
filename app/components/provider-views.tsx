@@ -7,6 +7,8 @@ import type {
 import type { IntegrationReadiness } from "@/lib/platform/config";
 import type { SpecReviewRecord } from "@/lib/data/specs";
 import type { ProviderInvitationRecord } from "@/lib/data/invitations";
+import type { ProviderSourceArtifact } from "@/lib/data/provider-artifacts";
+import type { ProviderVerification } from "@/lib/data/provider-verification";
 import {
   appHref,
   DefinitionRow,
@@ -22,17 +24,25 @@ import {
 
 export type ProviderViewData = {
   workspaceId: string;
+  verifiedDomain: string | null;
+  brandingApprovedAt: string | null;
+  selectedCampaignId?: string;
   dashboard: ProviderDashboard;
   campaigns: CampaignRecord[];
   auditEvents: AuditRecord[];
   reviewSpecs: SpecReviewRecord[];
   invitations: ProviderInvitationRecord[];
+  artifacts: ProviderSourceArtifact[];
+  verification: ProviderVerification | null;
   integrations: IntegrationReadiness;
 };
 
 function ProviderOverview({ data }: { data?: ProviderViewData }) {
   const dashboard = data?.dashboard;
   const integrations = data?.integrations;
+  const verified = Boolean(data?.verifiedDomain);
+  const brandingApproved = Boolean(data?.brandingApprovedAt);
+  const verification = data?.verification;
   return (
     <>
       <PageHeading
@@ -51,11 +61,24 @@ function ProviderOverview({ data }: { data?: ProviderViewData }) {
           01
         </div>
         <div className="callout-copy">
-          <StatusPill tone="warning">Setup required</StatusPill>
-          <h2>Finish your provider workspace</h2>
+          <StatusPill tone={verified ? "success" : "warning"}>
+            {brandingApproved
+              ? "Provider verified"
+              : verified
+                ? "Domain verified"
+                : "Setup required"}
+          </StatusPill>
+          <h2>
+            {verified
+              ? data?.verifiedDomain
+              : "Verify your provider-owned domain"}
+          </h2>
           <p>
-            Verify your organization and connect production services before a
-            migration specification can be approved or launched.
+            {verified
+              ? brandingApproved
+                ? "Domain ownership and internal branding approval are both recorded in the audit chain."
+                : "Ownership was proven with a DNS TXT challenge and recorded in the audit chain. Branding still requires internal approval."
+              : "Prove domain ownership with a public DNS TXT record. The challenge expires after 24 hours."}
           </p>
         </div>
         <a className="button button-dark" href="#integrations">
@@ -63,6 +86,71 @@ function ProviderOverview({ data }: { data?: ProviderViewData }) {
           <span aria-hidden="true">↓</span>
         </a>
       </section>
+
+      {!verified ? (
+        <section className="panel verification-panel">
+          <SectionHeading
+            title="Provider domain"
+            description="The verification value is public DNS data, not a secret. A fresh challenge replaces an older one for the same domain."
+          />
+          {verification?.status === "pending" ? (
+            <div className="verification-instructions">
+              <DefinitionRow label="Record type" value="TXT" mono />
+              <DefinitionRow label="DNS name" value={verification.dnsName} mono />
+              <DefinitionRow
+                label="TXT value"
+                value={verification.verificationValue}
+                mono
+              />
+              <DefinitionRow
+                label="Expires"
+                value={new Date(verification.expiresAt).toLocaleString("en-US")}
+              />
+              <form action="/api/provider-verification/confirm" method="post">
+                <input
+                  name="organizationId"
+                  type="hidden"
+                  value={data?.workspaceId ?? ""}
+                />
+                <input
+                  name="challengeId"
+                  type="hidden"
+                  value={verification.id}
+                />
+                <button className="button button-primary" type="submit">
+                  Check DNS record
+                </button>
+              </form>
+            </div>
+          ) : (
+            <form
+              className="verification-form"
+              action="/api/provider-verification/start"
+              method="post"
+            >
+              <input
+                name="organizationId"
+                type="hidden"
+                value={data?.workspaceId ?? ""}
+              />
+              <label className="field">
+                <span>Provider-owned domain</span>
+                <input
+                  name="domain"
+                  type="text"
+                  inputMode="url"
+                  autoComplete="url"
+                  placeholder="api-provider.com"
+                  required
+                />
+              </label>
+              <button className="button button-primary" type="submit">
+                Create DNS challenge
+              </button>
+            </form>
+          )}
+        </section>
+      ) : null}
 
       <section className="metric-grid" aria-label="Campaign summary">
         <MetricCard
@@ -114,8 +202,8 @@ function ProviderOverview({ data }: { data?: ProviderViewData }) {
               mark="ID"
               name="Organization identity"
               description="Members, roles, and provider verification"
-              status="Connected"
-              statusTone="success"
+              status={verified ? "Verified" : "Domain pending"}
+              statusTone={verified ? "success" : "warning"}
             />
             <IntegrationRow
               mark="DB"
@@ -229,7 +317,11 @@ function Campaigns({ data }: { data?: ProviderViewData }) {
               {campaigns.slice(0, 5).map((campaign) => (
                 <article className="campaign-record" key={campaign.id}>
                   <div>
-                    <strong>{campaign.name}</strong>
+                    <a
+                      href={`/?view=spec&campaign=${encodeURIComponent(campaign.id)}`}
+                    >
+                      <strong>{campaign.name}</strong>
+                    </a>
                     <code>{campaign.packageName}</code>
                   </div>
                   <StatusPill
@@ -243,6 +335,41 @@ function Campaigns({ data }: { data?: ProviderViewData }) {
                   >
                     {campaign.status.replaceAll("_", " ")}
                   </StatusPill>
+                  <div className="campaign-actions">
+                    {campaign.status === "live" ||
+                    campaign.status === "paused" ? (
+                      <form action="/api/campaigns/state" method="post">
+                        <input
+                          name="organizationId"
+                          type="hidden"
+                          value={data?.workspaceId ?? ""}
+                        />
+                        <input name="campaignId" type="hidden" value={campaign.id} />
+                        <input
+                          name="target"
+                          type="hidden"
+                          value={campaign.status === "live" ? "paused" : "live"}
+                        />
+                        <button className="button button-small button-secondary" type="submit">
+                          {campaign.status === "live" ? "Pause" : "Resume"}
+                        </button>
+                      </form>
+                    ) : null}
+                    {campaign.status !== "archived" ? (
+                      <form action="/api/campaigns/state" method="post">
+                        <input
+                          name="organizationId"
+                          type="hidden"
+                          value={data?.workspaceId ?? ""}
+                        />
+                        <input name="campaignId" type="hidden" value={campaign.id} />
+                        <input name="target" type="hidden" value="archived" />
+                        <button className="button button-small button-secondary" type="submit">
+                          Archive
+                        </button>
+                      </form>
+                    ) : null}
+                  </div>
                 </article>
               ))}
             </div>
@@ -320,7 +447,7 @@ function Campaigns({ data }: { data?: ProviderViewData }) {
                   <small>{campaign.packageName}</small>
                 </span>
                 <span role="cell">{campaign.status.replaceAll("_", " ")}</span>
-                <span role="cell">0</span>
+                <span role="cell">{campaign.consentedCustomerCount}</span>
                 <span role="cell">
                   {new Date(campaign.updatedAt).toLocaleDateString("en-US")}
                 </span>
@@ -415,40 +542,29 @@ function Campaigns({ data }: { data?: ProviderViewData }) {
   );
 }
 
-const ruleAreas = [
-  {
-    id: "STRIPE-IMPORTS",
-    title: "Constructor and import changes",
-    detail: "ESM, CommonJS, aliases, and client initialization.",
-    tone: "Deterministic",
-  },
-  {
-    id: "STRIPE-TYPES",
-    title: "Relevant type renames",
-    detail: "Symbol-aware references and return-value annotations.",
-    tone: "Needs evidence",
-  },
-  {
-    id: "STRIPE-DECIMAL",
-    title: "Stripe.Decimal",
-    detail: "Type and value usage across supported call sites.",
-    tone: "Needs evidence",
-  },
-  {
-    id: "STRIPE-CONTEXT",
-    title: "StripeContext",
-    detail: "Context propagation and explicitly unsupported patterns.",
-    tone: "Needs evidence",
-  },
-];
-
 function MigrationSpec({ data }: { data?: ProviderViewData }) {
-  const review = data?.reviewSpecs[0];
-  const campaign = data?.campaigns.find(
-    (candidate) => candidate.id === review?.campaignId,
-  );
+  const campaign =
+    data?.campaigns.find(
+      (candidate) => candidate.id === data.selectedCampaignId,
+    ) ?? data?.campaigns[0];
+  const campaignSpecs =
+    data?.reviewSpecs
+      .filter((candidate) => candidate.campaignId === campaign?.id)
+      .sort((left, right) => {
+        if (left.status === "draft" && right.status !== "draft") return -1;
+        if (right.status === "draft" && left.status !== "draft") return 1;
+        return right.revision - left.revision;
+      }) ?? [];
+  const review = campaignSpecs[0];
+  const artifacts =
+    data?.artifacts.filter(
+      (artifact) => artifact.campaignId === campaign?.id,
+    ) ?? [];
+  const changes = review?.content.changes ?? [];
   const approved = review?.status === "approved";
   const runnable = campaign?.status === "live";
+  const submitted = Boolean(review?.submittedForReviewAt);
+  const independentReference = Boolean(campaign?.independentReference);
   return (
     <>
       <PageHeading
@@ -456,14 +572,9 @@ function MigrationSpec({ data }: { data?: ProviderViewData }) {
         title="Migration specification"
         description="Turn provider-authored migration evidence into versioned detectors, transformations, and validation expectations."
         actions={
-          <>
-            <SecondaryLink href={appHref("provider", "campaigns")}>
-              Back to campaigns
-            </SecondaryLink>
-            <button className="button button-disabled" type="button" disabled>
-              Approve specification
-            </button>
-          </>
+          <SecondaryLink href={appHref("provider", "campaigns")}>
+            Back to campaigns
+          </SecondaryLink>
         }
       />
 
@@ -472,11 +583,15 @@ function MigrationSpec({ data }: { data?: ProviderViewData }) {
           <section className="panel spec-identity">
             <div className="spec-title-row">
               <div className="package-mark" aria-hidden="true">
-                S
+                {(campaign?.packageName ?? "API").slice(0, 1).toUpperCase()}
               </div>
               <div>
                 <div className="blueprint-topline">
-                  <StatusPill tone="indigo">Independent reference</StatusPill>
+                  <StatusPill tone="indigo">
+                    {independentReference
+                      ? "Independent reference"
+                      : "Provider-authored"}
+                  </StatusPill>
                   <StatusPill
                     tone={runnable ? "success" : approved ? "indigo" : "warning"}
                   >
@@ -489,28 +604,30 @@ function MigrationSpec({ data }: { data?: ProviderViewData }) {
                           : "Not created"}
                   </StatusPill>
                 </div>
-                <h2>Stripe Node SDK migration</h2>
+                <h2>{campaign?.name ?? "Select a campaign"}</h2>
                 <p>
                   {review
                     ? `${review.content.sourceArtifacts.length} immutable evidence artifacts are bound to this revision.`
-                    : "Catalog content only. Create the reference campaign to acquire and hash its public evidence."}
+                    : campaign
+                      ? "Upload migration evidence and author the first rule for this persisted draft."
+                      : "Create a campaign before adding provider migration evidence."}
                 </p>
               </div>
             </div>
             <dl className="spec-definitions">
               <DefinitionRow
                 label="Package"
-                value={review?.content.package.name ?? "stripe"}
+                value={review?.content.package.name ?? campaign?.packageName ?? "—"}
                 mono
               />
               <DefinitionRow
                 label="Source range"
-                value={review?.content.package.sourceRange ?? ">=20.3.0 <21.0.0"}
+                value={review?.content.package.sourceRange ?? campaign?.sourceRange ?? "—"}
                 mono
               />
               <DefinitionRow
                 label="Target version"
-                value={review?.content.package.targetVersion ?? "22.1.0"}
+                value={review?.content.package.targetVersion ?? campaign?.targetVersion ?? "—"}
                 mono
               />
               <DefinitionRow label="Runtime" value="Node.js / TypeScript" />
@@ -527,21 +644,290 @@ function MigrationSpec({ data }: { data?: ProviderViewData }) {
 
           <section className="panel">
             <SectionHeading
+              title="Campaign and immutable evidence"
+              description="Choose the campaign, then upload one file or acquire one public HTTPS source. Raw and extracted evidence are encrypted before storage."
+              action={<StatusPill>{artifacts.length} artifacts</StatusPill>}
+            />
+            <nav className="campaign-picker" aria-label="Campaign selection">
+              {(data?.campaigns ?? []).map((candidate) => (
+                <a
+                  className={
+                    candidate.id === campaign?.id
+                      ? "filter-pill filter-pill-active"
+                      : "filter-pill"
+                  }
+                  href={`/?view=spec&campaign=${encodeURIComponent(candidate.id)}`}
+                  key={candidate.id}
+                >
+                  {candidate.packageName} → {candidate.targetVersion}
+                </a>
+              ))}
+            </nav>
+            {campaign ? (
+              <form
+                className="artifact-form"
+                action="/api/provider-artifacts"
+                method="post"
+                encType="multipart/form-data"
+              >
+                <input
+                  name="organizationId"
+                  type="hidden"
+                  value={data?.workspaceId ?? ""}
+                />
+                <input name="campaignId" type="hidden" value={campaign.id} />
+                <label className="field">
+                  <span>Evidence title</span>
+                  <input
+                    name="title"
+                    type="text"
+                    placeholder="v3 migration guide"
+                    required
+                  />
+                </label>
+                <label className="field">
+                  <span>Evidence type</span>
+                  <select name="kind" defaultValue="markdown" required>
+                    <option value="markdown">Markdown</option>
+                    <option value="html">HTML page</option>
+                    <option value="pdf">PDF</option>
+                    <option value="json">JSON</option>
+                    <option value="yaml">YAML</option>
+                    <option value="sdk_diff">SDK diff</option>
+                    <option value="openapi">OpenAPI</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Upload a file</span>
+                  <input name="file" type="file" />
+                </label>
+                <label className="field">
+                  <span>Or acquire a public HTTPS URL</span>
+                  <input
+                    name="url"
+                    type="url"
+                    inputMode="url"
+                    placeholder="https://docs.provider.com/migrate"
+                  />
+                </label>
+                <button className="button button-primary" type="submit">
+                  Store immutable evidence
+                </button>
+              </form>
+            ) : (
+              <EmptyState
+                compact
+                symbol="—"
+                title="No campaign selected"
+                description="Create a persisted campaign before uploading evidence."
+              />
+            )}
+            {artifacts.length > 0 ? (
+              <div className="artifact-list">
+                {artifacts.map((artifact) => (
+                  <article className="artifact-record" key={artifact.id}>
+                    <div>
+                      <strong>{artifact.title}</strong>
+                      <small>
+                        {artifact.kind} · {artifact.sizeBytes.toLocaleString()} bytes
+                      </small>
+                    </div>
+                    <StatusPill
+                      tone={
+                        artifact.extractionStatus === "complete"
+                          ? "success"
+                          : "warning"
+                      }
+                    >
+                      {artifact.extractionStatus}
+                    </StatusPill>
+                    <code title={artifact.sha256}>
+                      SHA-256 {artifact.sha256.slice(0, 12)}…
+                    </code>
+                    {artifact.preview ? <p>{artifact.preview}</p> : null}
+                  </article>
+                ))}
+              </div>
+            ) : null}
+          </section>
+
+          {campaign && artifacts.length > 0 ? (
+            <section className="panel">
+              <SectionHeading
+                title="Author an evidence-backed rule"
+                description="Provider input stays declarative: it can configure supported detectors, templates, or a constrained residual model step, but cannot upload executable code."
+              />
+              <form className="rule-form" action="/api/specs" method="post">
+                <input
+                  name="organizationId"
+                  type="hidden"
+                  value={data?.workspaceId ?? ""}
+                />
+                <input name="campaignId" type="hidden" value={campaign.id} />
+                <label className="field">
+                  <span>Rule ID</span>
+                  <input name="ruleId" type="text" placeholder="SDK-IMPORT-01" required />
+                </label>
+                <label className="field">
+                  <span>Severity</span>
+                  <select name="severity" defaultValue="breaking" required>
+                    <option value="breaking">Breaking</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                    <option value="informational">Informational</option>
+                  </select>
+                </label>
+                <label className="field field-wide">
+                  <span>Rule title</span>
+                  <input name="title" type="text" required />
+                </label>
+                <label className="field field-wide">
+                  <span>Customer-facing description</span>
+                  <textarea name="description" rows={3} required />
+                </label>
+                <label className="field">
+                  <span>Evidence artifact</span>
+                  <select name="artifactId" defaultValue="" required>
+                    <option value="">Select evidence</option>
+                    {artifacts.map((artifact) => (
+                      <option value={artifact.id} key={artifact.id}>
+                        {artifact.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Evidence location</span>
+                  <input
+                    name="locator"
+                    type="text"
+                    placeholder="Section: Constructor changes"
+                    required
+                  />
+                </label>
+                <label className="field field-wide">
+                  <span>Exact evidence excerpt</span>
+                  <textarea
+                    name="excerpt"
+                    rows={3}
+                    placeholder="Leave blank to use a bounded extracted preview."
+                  />
+                </label>
+                <label className="field">
+                  <span>Detector</span>
+                  <select name="detectorKind" defaultValue="import" required>
+                    <option value="package_version">Package version</option>
+                    <option value="import">Import</option>
+                    <option value="constructor">Constructor</option>
+                    <option value="symbol_reference">Symbol reference</option>
+                    <option value="call_expression">Call expression</option>
+                    <option value="text_fallback">Text fallback</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Module/package name</span>
+                  <input
+                    name="moduleName"
+                    type="text"
+                    defaultValue={campaign.packageName}
+                    required
+                  />
+                </label>
+                <label className="field">
+                  <span>Symbol <small>Optional</small></span>
+                  <input name="symbol" type="text" />
+                </label>
+                <label className="field">
+                  <span>Member <small>Optional</small></span>
+                  <input name="member" type="text" />
+                </label>
+                <label className="field">
+                  <span>Bounded text pattern <small>Fallback only</small></span>
+                  <input name="textPattern" type="text" />
+                </label>
+                <label className="field">
+                  <span>Call argument index <small>Optional</small></span>
+                  <input name="callArgumentIndex" type="number" min="0" max="100" />
+                </label>
+                <label className="field">
+                  <span>Transformation</span>
+                  <select
+                    name="transformationKind"
+                    defaultValue="parameterized_template"
+                    required
+                  >
+                    <option value="parameterized_template">
+                      Before/after template
+                    </option>
+                    <option value="model_residual">
+                      Constrained residual model
+                    </option>
+                    <option value="manual">Manual guidance only</option>
+                  </select>
+                </label>
+                <label className="field checkbox-field">
+                  <input name="autoPatchEligible" type="checkbox" value="yes" />
+                  <span>Eligible for automatic patch generation</span>
+                </label>
+                <label className="field field-wide">
+                  <span>Before example</span>
+                  <textarea name="beforeExample" rows={4} className="code-input" />
+                </label>
+                <label className="field field-wide">
+                  <span>After example</span>
+                  <textarea name="afterExample" rows={4} className="code-input" />
+                </label>
+                <label className="field field-wide">
+                  <span>Rationale</span>
+                  <textarea name="rationale" rows={2} />
+                </label>
+                <label className="field">
+                  <span>Behavioral invariants <small>One per line</small></span>
+                  <textarea name="behavioralInvariants" rows={4} required />
+                </label>
+                <label className="field">
+                  <span>Validation hints <small>One per line</small></span>
+                  <textarea name="validationHints" rows={4} required />
+                </label>
+                <label className="field">
+                  <span>Known limitations <small>One per line</small></span>
+                  <textarea name="knownLimitations" rows={4} required />
+                </label>
+                <label className="field">
+                  <span>Campaign-wide limitations <small>One per line</small></span>
+                  <textarea name="generalLimitations" rows={4} />
+                </label>
+                <button className="button button-primary" type="submit">
+                  Save rule into draft revision
+                </button>
+              </form>
+            </section>
+          ) : null}
+
+          <section className="panel">
+            <SectionHeading
               title="Change entries"
               description="A runnable entry needs an immutable source citation, detector, transformation policy, and validation hint."
-              action={<StatusPill>{ruleAreas.length} catalog areas</StatusPill>}
+              action={<StatusPill>{changes.length} persisted rules</StatusPill>}
             />
             <div className="rule-list">
-              {ruleAreas.map((rule, index) => (
+              {changes.map((rule, index) => (
                 <article className="rule-row" key={rule.id}>
                   <span className="rule-index">{String(index + 1).padStart(2, "0")}</span>
                   <div className="rule-copy">
                     <code>{rule.id}</code>
                     <h3>{rule.title}</h3>
-                    <p>{rule.detail}</p>
+                    <p>{rule.description}</p>
+                    <small>
+                      Evidence: {rule.citations[0]?.locator ?? "missing"} ·
+                      Detector: {rule.detectors[0]?.kind ?? "missing"}
+                    </small>
                   </div>
-                  <StatusPill tone={index === 0 ? "indigo" : "warning"}>
-                    {rule.tone}
+                  <StatusPill
+                    tone={rule.autoPatchEligible ? "indigo" : "warning"}
+                  >
+                    {rule.transformation.kind.replaceAll("_", " ")}
                   </StatusPill>
                   <span className="rule-chevron" aria-hidden="true">
                     ›
@@ -556,19 +942,26 @@ function MigrationSpec({ data }: { data?: ProviderViewData }) {
               title="Unsupported behavior"
               description="Uncovered patterns must be visible to customers and may never be silently classified as safe."
             />
-            <div className="notice notice-warning">
-              <span className="notice-symbol" aria-hidden="true">
-                !
-              </span>
-              <div>
-                <strong>No limitations have been approved yet</strong>
-                <p>
-                  Record dynamic imports, private registry requirements,
-                  external-service tests, and ambiguous behavioral changes
-                  before review.
-                </p>
+            {review?.content.generalLimitations.length ? (
+              <ul className="cross-list">
+                {review.content.generalLimitations.map((limitation) => (
+                  <li key={limitation}>{limitation}</li>
+                ))}
+              </ul>
+            ) : (
+              <div className="notice notice-warning">
+                <span className="notice-symbol" aria-hidden="true">
+                  !
+                </span>
+                <div>
+                  <strong>No campaign-wide limitations recorded</strong>
+                  <p>
+                    Record skipped scope, unsupported installation behavior,
+                    and ambiguous changes before provider review.
+                  </p>
+                </div>
               </div>
-            </div>
+            )}
           </section>
         </div>
 
@@ -577,30 +970,34 @@ function MigrationSpec({ data }: { data?: ProviderViewData }) {
             <div className="panel-kicker">Approval gate</div>
             <h2>
               {runnable
-                ? "Campaign is live"
+                ? review?.status === "draft"
+                  ? "Revision pending"
+                  : "Campaign is live"
                 : approved
                   ? "Approved for launch"
-                  : review
+                  : submitted
                     ? "Ready for provider decision"
+                    : review
+                      ? "Draft in authoring"
                     : "Not ready for review"}
             </h2>
             <p>
-              Every requirement below is enforced before a specification can
-              become runnable.
+              Evidence, review submission, and exact-hash approval are enforced.
+              Domain verification separately controls provider branding.
             </p>
             <ol className="gate-list">
               <li>
                 <span>1</span>
                 <div>
-                  <strong>Provider verified</strong>
-                  <small>Pending</small>
+                  <strong>Provider domain</strong>
+                  <small>{data?.verifiedDomain ?? "Branding disabled"}</small>
                 </div>
               </li>
               <li>
                 <span>2</span>
                 <div>
                   <strong>Artifacts immutable</strong>
-                  <small>{review ? "Recorded" : "Not uploaded"}</small>
+                  <small>{artifacts.length ? "Recorded" : "Not uploaded"}</small>
                 </div>
               </li>
               <li>
@@ -610,7 +1007,7 @@ function MigrationSpec({ data }: { data?: ProviderViewData }) {
                   <small>
                     {review
                       ? `${review.content.changes.length} evidenced rules`
-                      : "Catalog only"}
+                      : "Not authored"}
                   </small>
                 </div>
               </li>
@@ -618,11 +1015,38 @@ function MigrationSpec({ data }: { data?: ProviderViewData }) {
                 <span>4</span>
                 <div>
                   <strong>Provider approval</strong>
-                  <small>{approved ? "Recorded" : "Required"}</small>
+                  <small>
+                    {approved
+                      ? "Recorded"
+                      : submitted
+                        ? "Decision required"
+                        : "Submit review first"}
+                  </small>
                 </div>
               </li>
             </ol>
-            {review && !approved ? (
+            {review && !approved && !submitted ? (
+              <form action="/api/specs/review" method="post">
+                <input
+                  name="organizationId"
+                  type="hidden"
+                  value={data?.workspaceId ?? ""}
+                />
+                <input name="campaignId" type="hidden" value={review.campaignId} />
+                <input name="specId" type="hidden" value={review.id} />
+                <input
+                  name="contentSha256"
+                  type="hidden"
+                  value={review.contentSha256}
+                />
+                <button
+                  className="button button-primary button-block"
+                  type="submit"
+                >
+                  Submit exact revision for review
+                </button>
+              </form>
+            ) : review && !approved && submitted ? (
               <form action="/api/campaigns/approve" method="post">
                 <input
                   name="organizationId"

@@ -4,6 +4,7 @@ import type { CustomerWorkspaceData, PatchReviewData } from "@/lib/data/customer
 import type { ConsentDisclosure } from "@/lib/domain";
 import type { Workspace } from "@/lib/data/control-plane";
 import type { IntegrationReadiness } from "@/lib/platform/config";
+import type { OperationsOverviewData } from "@/lib/data/operations";
 import { CustomerView } from "./customer-views";
 import { OperationsView } from "./operations-view";
 import { ProviderView, type ProviderViewData } from "./provider-views";
@@ -54,6 +55,7 @@ function ViewRenderer({
   surface,
   view,
   providerData,
+  operationsData,
   customerData,
   patchReview,
   consentDisclosure,
@@ -63,6 +65,7 @@ function ViewRenderer({
   surface: Surface;
   view: AppView;
   providerData?: ProviderViewData;
+  operationsData?: OperationsOverviewData;
   customerData?: CustomerWorkspaceData;
   patchReview?: PatchReviewData | null;
   consentDisclosure: ConsentDisclosure;
@@ -84,7 +87,14 @@ function ViewRenderer({
       />
     );
   }
-  return <OperationsView view={view} />;
+  return (
+    <OperationsView
+      view={view}
+      data={operationsData}
+      integrations={integrations}
+      workspaceId={workspaceId}
+    />
+  );
 }
 
 function Sidebar({
@@ -213,6 +223,7 @@ export function ProductShell({
   workspace,
   actor,
   providerData,
+  operationsData,
   customerData,
   patchReview,
   consentDisclosure,
@@ -224,6 +235,7 @@ export function ProductShell({
   workspace: Workspace;
   actor: AuthenticatedActor;
   providerData?: ProviderViewData;
+  operationsData?: OperationsOverviewData;
   customerData?: CustomerWorkspaceData;
   patchReview?: PatchReviewData | null;
   consentDisclosure: ConsentDisclosure;
@@ -265,7 +277,8 @@ export function ProductShell({
           <ViewRenderer
             surface={surface}
             view={view}
-            providerData={providerData}
+          providerData={providerData}
+          operationsData={operationsData}
             customerData={customerData}
             patchReview={patchReview}
             consentDisclosure={consentDisclosure}

@@ -9,6 +9,9 @@ import { customerPatchReview, customerWorkspaceData } from "@/lib/data/customer"
 import { MODEL_CONSENT_DISCLOSURE } from "@/lib/domain";
 import { listSpecsForReview } from "@/lib/data/specs";
 import { listProviderInvitations } from "@/lib/data/invitations";
+import { listProviderArtifacts } from "@/lib/data/provider-artifacts";
+import { currentProviderVerification } from "@/lib/data/provider-verification";
+import { operationsOverview } from "@/lib/data/operations";
 import { integrationReadiness } from "@/lib/platform/config";
 import { WorkspaceOnboarding, SignInScreen } from "./components/onboarding";
 import { ProductShell } from "./components/product-shell";
@@ -148,6 +151,67 @@ function flashFromQuery(query: Record<string, SearchValue>) {
         "The read-only assessment was queued against the recorded base commit. You can safely leave this page while the durable workflow runs.",
     };
   }
+  if (first(query.erasure) === "queued") {
+    return {
+      tone: "success" as const,
+      message:
+        "Source-derived artifacts were queued for storage-verified deletion. The deletion evidence will remain in the audit record.",
+    };
+  }
+  if (first(query.artifact) === "stored") {
+    return {
+      tone: "success" as const,
+      message:
+        "The evidence was acquired, extracted under bounded limits, encrypted, hashed, and persisted.",
+    };
+  }
+  if (first(query.rule) === "saved") {
+    return {
+      tone: "success" as const,
+      message:
+        "The rule was validated and saved into the campaign's versioned draft specification.",
+    };
+  }
+  if (first(query.review) === "submitted") {
+    return {
+      tone: "success" as const,
+      message:
+        "The exact specification hash is frozen for provider approval. Further edits will clear this review submission.",
+    };
+  }
+  if (first(query.verification) === "started") {
+    return {
+      tone: "success" as const,
+      message:
+        "The DNS verification challenge was persisted. Publish the displayed TXT value, then check the record.",
+    };
+  }
+  if (first(query.verification) === "complete") {
+    return {
+      tone: "success" as const,
+      message:
+        "Provider domain ownership was verified through DNS and recorded in the audit chain.",
+    };
+  }
+  if (first(query.branding) === "approved") {
+    return {
+      tone: "success" as const,
+      message:
+        "Provider branding was approved after verified domain ownership and recorded in the audit chain.",
+    };
+  }
+  const campaignState = first(query.campaign_state);
+  if (
+    campaignState === "live" ||
+    campaignState === "paused" ||
+    campaignState === "completed" ||
+    campaignState === "archived"
+  ) {
+    return {
+      tone: "success" as const,
+      message: `The campaign is now ${campaignState}.`,
+    };
+  }
   return undefined;
 }
 
@@ -173,6 +237,8 @@ export default async function Home({ searchParams }: HomeProps) {
           listAuditEvents(context.workspace.organizationId, 25),
           listSpecsForReview(context.workspace.organizationId),
           listProviderInvitations(context.workspace.organizationId),
+          listProviderArtifacts(context.workspace.organizationId),
+          currentProviderVerification(context.workspace.organizationId),
         ]).then(
           ([
             dashboard,
@@ -180,13 +246,21 @@ export default async function Home({ searchParams }: HomeProps) {
             auditEvents,
             reviewSpecs,
             invitations,
+            artifacts,
+            verification,
           ]) => ({
           workspaceId: context.workspace.organizationId,
+          verifiedDomain: context.workspace.verifiedDomain,
+          brandingApprovedAt:
+            context.workspace.providerBrandingApprovedAt,
+          selectedCampaignId: first(query.campaign),
           dashboard,
           campaigns,
           auditEvents,
           reviewSpecs,
           invitations,
+          artifacts,
+          verification,
           integrations,
           }),
         )
@@ -197,6 +271,10 @@ export default async function Home({ searchParams }: HomeProps) {
           context.workspace.organizationId,
           first(query.migration),
         )
+      : undefined;
+  const operationsData =
+    surface === "operations"
+      ? await operationsOverview(context.tenant)
       : undefined;
   const selectedMigrationId =
     first(query.migration) ?? customerData?.selectedMigration?.id;
@@ -221,6 +299,7 @@ export default async function Home({ searchParams }: HomeProps) {
           workspace={context.workspace}
           actor={actor}
           providerData={providerData}
+          operationsData={operationsData}
           customerData={customerData}
           patchReview={patchReview}
           consentDisclosure={MODEL_CONSENT_DISCLOSURE}

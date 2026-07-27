@@ -198,6 +198,7 @@ export async function updateInstallationFromWebhook(input: {
 }
 
 export async function applyPullRequestLifecycle(input: {
+  installationId: string;
   repositoryId: string;
   pullRequestNumber: number;
   headBranch: string;
@@ -214,17 +215,24 @@ export async function applyPullRequestLifecycle(input: {
       `SELECT
         mr.id,
         mr.organization_id AS organizationId,
-        mr.repository_migration_id AS repositoryMigrationId
+        mr.repository_migration_id AS repositoryMigrationId,
+        mr.state,
+        mr.verification_run_id AS verificationRunId
        FROM migration_runs mr
        JOIN repositories r ON r.id = mr.repository_id
+       JOIN github_installations gi ON gi.id = r.patcher_installation_id
        WHERE r.github_repository_id = ?
-         AND json_extract(mr.manifest, '$.pullRequest.number') = ?
-         AND json_extract(mr.manifest, '$.pullRequest.branch') = ?
+          AND gi.app_kind = 'patcher'
+          AND gi.github_installation_id = ?
+          AND gi.status = 'active'
+          AND json_extract(mr.manifest, '$.pullRequest.number') = ?
+          AND json_extract(mr.manifest, '$.pullRequest.branch') = ?
        ORDER BY mr.created_at DESC
        LIMIT 1`,
     )
     .bind(
       input.repositoryId,
+      input.installationId,
       input.pullRequestNumber,
       input.headBranch,
     )
@@ -232,26 +240,41 @@ export async function applyPullRequestLifecycle(input: {
       id: string;
       organizationId: string;
       repositoryMigrationId: string;
+      state: string;
+      verificationRunId: string | null;
     }>();
   if (!run) return 0;
 
   const now = new Date().toISOString();
   if (input.merged) {
-    await database.batch([
-      database
+    if (
+      !input.mergeCommitSha ||
+      !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(input.mergeCommitSha)
+    ) {
+      return 0;
+    }
+    if (run.verificationRunId) return 0;
+    if (run.state !== "pr_open" && run.state !== "merged") return 0;
+    if (run.state === "pr_open") {
+      const claim = await database
         .prepare(
           `UPDATE migration_runs
            SET state = 'merged', merge_commit_sha = ?, completed_at = ?,
                updated_at = ?
-           WHERE id = ? AND organization_id = ?`,
+           WHERE id = ? AND organization_id = ? AND state = 'pr_open'
+             AND verification_run_id IS NULL`,
         )
         .bind(
-          input.mergeCommitSha?.toLowerCase() ?? null,
+          input.mergeCommitSha.toLowerCase(),
           now,
           now,
           run.id,
           run.organizationId,
-        ),
+        )
+        .run();
+      if (claim.meta.changes === 0) return 0;
+    }
+    await database.batch([
       database
         .prepare(
           "UPDATE repository_migrations SET state = 'merged', updated_at = ? WHERE id = ? AND organization_id = ?",
@@ -269,7 +292,7 @@ export async function applyPullRequestLifecycle(input: {
         )
         .bind(now, run.repositoryMigrationId, run.organizationId),
     ]);
-    if (input.mergeCommitSha && input.requestUrl) {
+    if (input.requestUrl) {
       await enqueueVerificationScan({
         organizationId: run.organizationId,
         repositoryMigrationId: run.repositoryMigrationId,
@@ -281,7 +304,7 @@ export async function applyPullRequestLifecycle(input: {
     return 1;
   }
 
-  if (input.action === "closed") {
+  if (input.action === "closed" && run.state === "pr_open") {
     await database.batch([
       database
         .prepare(

@@ -1,6 +1,8 @@
 import { getD1 } from "./index";
 import baselineSql from "../drizzle/0000_sleepy_landau.sql?raw";
 import patchWorkflowSql from "../drizzle/0001_patch_workflow.sql?raw";
+import providerAuthoringSql from "../drizzle/0002_far_chameleon.sql?raw";
+import providerReviewSql from "../drizzle/0003_green_ironclad.sql?raw";
 
 const STATEMENT_BREAKPOINT = "--> statement-breakpoint";
 
@@ -12,6 +14,8 @@ const STATEMENT_BREAKPOINT = "--> statement-breakpoint";
 const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
   { version: 1, sql: baselineSql },
   { version: 2, sql: patchWorkflowSql },
+  { version: 3, sql: providerAuthoringSql },
+  { version: 4, sql: providerReviewSql },
 ];
 
 let initialization: Promise<void> | undefined;

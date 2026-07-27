@@ -18,22 +18,28 @@ import {
 
 function citation(value: unknown, index: number): SourceCitation {
   const input = record(value, `findings[].evidence[${index}]`);
-  const rawUrl = text(input.url, "citation.url", 2_048) as string;
-  let url: URL;
-  try {
-    url = new URL(rawUrl);
-  } catch {
-    throw new DomainError("VALIDATION_FAILED", "Citation URL is invalid.");
-  }
-  if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) {
-    throw new DomainError(
-      "VALIDATION_FAILED",
-      "Citation URL must be an HTTP(S) URL without credentials.",
-    );
+  const rawUrl = text(input.url, "citation.url", 2_048, true);
+  let url: URL | undefined;
+  if (rawUrl) {
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      throw new DomainError("VALIDATION_FAILED", "Citation URL is invalid.");
+    }
+    if (
+      !["https:", "http:"].includes(url.protocol) ||
+      url.username ||
+      url.password
+    ) {
+      throw new DomainError(
+        "VALIDATION_FAILED",
+        "Citation URL must be an HTTP(S) URL without credentials.",
+      );
+    }
   }
   return {
     title: text(input.title, "citation.title", 500) as string,
-    url: url.toString(),
+    ...(url ? { url: url.toString() } : {}),
   };
 }
 

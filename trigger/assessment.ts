@@ -1,7 +1,16 @@
 import { task } from "@trigger.dev/sdk";
 import type { MigrationAssessment } from "@/lib/migration/contracts";
-import { assessStripeV20ToV22 } from "@/lib/migration/analyzer";
+import {
+  assessMigrationSpec,
+  genericAnalyzerVersion,
+} from "@/lib/migration/generic-analyzer";
 import { GitHubAppGateway } from "@/lib/integrations/github";
+import { E2BAssessmentSandboxRunner } from "@/lib/integrations/assessment-sandbox";
+import {
+  OpenAIModelGateway,
+  type ModelEvidence,
+  type UnresolvedCandidate,
+} from "@/lib/integrations/model";
 import type { AssessmentWorkPacket } from "@/lib/data/assessments";
 
 type AssessmentPayload = {
@@ -71,6 +80,174 @@ function minimizeAssessment(assessment: MigrationAssessment): MigrationAssessmen
   };
 }
 
+function snippetFor(
+  source: string,
+  start: number,
+  end: number,
+): string {
+  const boundedStart = Math.max(0, start - 1_500);
+  const boundedEnd = Math.min(source.length, end + 1_500);
+  return source.slice(boundedStart, boundedEnd);
+}
+
+async function classifyUnresolved(input: {
+  assessment: MigrationAssessment;
+  packet: AssessmentWorkPacket;
+  files: readonly { path: string; content: string }[];
+  baseUrl: URL;
+}): Promise<{
+  assessment: MigrationAssessment;
+  model?: {
+    model: string;
+    responseId: string;
+    inputTokens: number;
+    outputTokens: number;
+  };
+}> {
+  const unresolved = input.assessment.findings
+    .filter(
+      (finding) =>
+        finding.coverage !== "full" || finding.confidence === "low",
+    )
+    .slice(0, 30);
+  if (unresolved.length === 0) return { assessment: input.assessment };
+
+  const consentUrl = new URL(
+    `/api/internal/runs/${encodeURIComponent(input.packet.runId)}/model-consent`,
+    input.baseUrl,
+  );
+  const consent = await controlPlane<{
+    allowed: boolean;
+    policyVersion: string | null;
+  }>(consentUrl, { method: "POST" });
+  if (!consent.allowed || !consent.policyVersion) {
+    return { assessment: input.assessment };
+  }
+
+  const files = new Map(input.files.map((file) => [file.path, file.content]));
+  const candidates: UnresolvedCandidate[] = unresolved.flatMap((finding) => {
+    const source = files.get(finding.path);
+    if (source === undefined) return [];
+    return [
+      {
+        id: finding.id,
+        ruleId: finding.ruleId,
+        path: finding.path,
+        snippet: snippetFor(
+          source,
+          finding.location.start,
+          finding.location.end,
+        ),
+        start: finding.location.start,
+        end: finding.location.end,
+        localConventions: [],
+      },
+    ];
+  });
+  const evidenceById = new Map<string, ModelEvidence>();
+  for (const change of input.packet.spec.changes) {
+    for (const citation of change.citations) {
+      if (!citation.excerpt) continue;
+      const artifact = input.packet.spec.sourceArtifacts.find(
+        (candidate) => candidate.id === citation.artifactId,
+      );
+      const id = `${change.id}:${citation.artifactId}:${citation.locator}`;
+      evidenceById.set(id, {
+        id,
+        title: artifact?.title ?? "Provider artifact",
+        citation: citation.locator,
+        text: citation.excerpt,
+      });
+    }
+  }
+  const evidence = [...evidenceById.values()].slice(0, 40);
+  if (candidates.length === 0 || evidence.length === 0) {
+    return { assessment: input.assessment };
+  }
+
+  try {
+    const result = await new OpenAIModelGateway().classify({
+      candidates,
+      evidence,
+      allowedPaths: [...new Set(candidates.map((candidate) => candidate.path))],
+      consentPolicyVersion: consent.policyVersion,
+    });
+    const classifications = new Map(
+      result.output.classifications.map((item) => [item.candidateId, item]),
+    );
+    const findings = input.assessment.findings.flatMap((finding) => {
+      const classification = classifications.get(finding.id);
+      if (!classification) return [finding];
+      if (classification.classification === "not_affected") return [];
+      return [
+        {
+          ...finding,
+          confidence:
+            classification.confidence >= 0.98
+              ? ("certain" as const)
+              : classification.confidence >= 0.8
+                ? ("high" as const)
+                : classification.confidence >= 0.5
+                  ? ("medium" as const)
+                  : ("low" as const),
+          coverage:
+            classification.classification === "unsupported"
+              ? ("unsupported" as const)
+              : classification.classification === "uncertain"
+                ? ("partial" as const)
+                : finding.coverage,
+          autoPatchEligible:
+            classification.classification === "affected" &&
+            finding.autoPatchEligible,
+          message: `${finding.message} Model classification: ${classification.rationale}`,
+        },
+      ];
+    });
+    const hasPartial = findings.some(
+      (finding) =>
+        finding.coverage !== "full" || !finding.autoPatchEligible,
+    );
+    return {
+      assessment: {
+        ...input.assessment,
+        findings,
+        status:
+          findings.length === 0
+            ? input.assessment.skipped.length > 0
+              ? "partial-coverage"
+              : "no-impact"
+            : hasPartial
+              ? "partial-coverage"
+              : "impact-found",
+      },
+      model: {
+        model: result.model,
+        responseId: result.responseId,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+      },
+    };
+  } catch {
+    return {
+      assessment: {
+        ...input.assessment,
+        status:
+          input.assessment.findings.length > 0
+            ? "partial-coverage"
+            : input.assessment.status,
+        skipped: [
+          ...input.assessment.skipped,
+          {
+            path: "[repository]",
+            reason:
+              "Consented model classification was unavailable; deterministic findings were preserved as partial coverage.",
+          },
+        ],
+      },
+    };
+  }
+}
+
 export const assessmentRun = task({
   id: "assessment-run",
   retry: {
@@ -104,9 +281,22 @@ export const assessmentRun = task({
       repository: packet.repository,
       baseSha: packet.baseSha,
     });
-    const assessment = minimizeAssessment(
-      assessStripeV20ToV22(gatewayResult.files),
-    );
+    const sandboxResult = await new E2BAssessmentSandboxRunner().index({
+      runId: payload.runId,
+      files: gatewayResult.files,
+    });
+    const deterministicAssessment = assessMigrationSpec({
+        files: gatewayResult.files,
+        spec: packet.spec,
+        symbolIndex: sandboxResult.index,
+      });
+    const classified = await classifyUnresolved({
+        assessment: deterministicAssessment,
+        packet,
+        files: gatewayResult.files,
+        baseUrl,
+      });
+    const assessment = minimizeAssessment(classified.assessment);
     const resultUrl = new URL(
       `/api/internal/runs/${encodeURIComponent(payload.runId)}/assessment-result`,
       baseUrl,
@@ -116,6 +306,15 @@ export const assessmentRun = task({
       body: JSON.stringify({
         assessment,
         skipped: gatewayResult.skipped,
+        execution: {
+          analyzerVersion: genericAnalyzerVersion,
+          sandboxId: sandboxResult.sandboxId,
+          sandboxImageVersion: sandboxResult.sandboxImageVersion,
+          network: sandboxResult.network,
+          sandboxDestroyedAt: sandboxResult.destroyedAt,
+          sourceDeletedAt: new Date().toISOString(),
+          ...(classified.model ? { model: classified.model } : {}),
+        },
       }),
     });
     return {

@@ -4,6 +4,7 @@ import type { PatchWorkPacket } from "@/lib/data/patches";
 import { GitHubAppGateway } from "@/lib/integrations/github";
 import {
   OpenAIModelGateway,
+  MODEL_RESIDUAL_PROMPT_VERSION,
   type ModelEvidence,
   type UnresolvedCandidate,
 } from "@/lib/integrations/model";
@@ -29,6 +30,8 @@ import {
 } from "@/lib/migration/syntax";
 import {
   createDeterministicStripePatch,
+  createParameterizedTemplatePatch,
+  parameterizedTemplateTransformerVersion,
   stripeTransformerVersion,
 } from "@/lib/migration/transformer";
 
@@ -136,6 +139,22 @@ function declaredScripts(files: readonly RepositoryFile[]): Set<string> {
   }
 }
 
+function dependencyPreparationFiles(
+  files: readonly RepositoryFile[],
+): Array<{ path: string; content: string }> {
+  const allowed = new Set([
+    "package.json",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "yarn.lock",
+  ]);
+  return files
+    .filter((file) => allowed.has(file.path.split("/").at(-1)?.toLowerCase() ?? ""))
+    .map((file) => ({ path: file.path, content: file.content }));
+}
+
 function scriptNameFor(
   category: string,
   scripts: ReadonlySet<string>,
@@ -193,15 +212,51 @@ function buildEvidence(packet: PatchWorkPacket): ModelEvidence[] {
     for (const [index, citation] of change.citations.entries()) {
       if (evidence.length >= 40) break;
       const artifact = artifacts.get(citation.artifactId);
+      const parameters = change.transformation.parameters;
+      const authoredExamples = [
+        typeof parameters.before === "string"
+          ? `Before example:\n${parameters.before}`
+          : "",
+        typeof parameters.after === "string"
+          ? `After example:\n${parameters.after}`
+          : "",
+        typeof parameters.rationale === "string"
+          ? `Rationale:\n${parameters.rationale}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       evidence.push({
         id: `${change.id}#${index}`.slice(0, 128),
         title: artifact?.title ?? change.title,
         citation: artifact?.externalUrl ?? citation.locator,
-        text: (citation.excerpt ?? change.description).slice(0, 4_000),
+        text: [
+          citation.excerpt ?? change.description,
+          authoredExamples,
+        ]
+          .filter(Boolean)
+          .join("\n\n")
+          .slice(0, 4_000),
       });
     }
   }
   return evidence;
+}
+
+function citationArtifactIds(
+  packet: PatchWorkPacket,
+  ruleIds: readonly string[],
+): string[] {
+  const requested = new Set(ruleIds);
+  return [
+    ...new Set(
+      packet.spec.changes
+        .filter((change) => requested.has(change.id))
+        .flatMap((change) =>
+          change.citations.map((citation) => citation.artifactId),
+        ),
+    ),
+  ];
 }
 
 function lineBoundedSnippet(
@@ -294,13 +349,31 @@ export const patchRun = task({
     const editedByPath = new Map(
       deterministic.files.map((file) => [file.path, file.newContent] as const),
     );
+    const deterministicPaths = new Set(
+      deterministic.files.map((file) => file.path),
+    );
+    const templates = await createParameterizedTemplatePatch({
+      baseSha: packet.baseSha,
+      files: source.files.filter(
+        (file) => allowed.has(file.path) && !deterministicPaths.has(file.path),
+      ),
+      findings: scopedFindings,
+      spec: packet.spec,
+    });
+    for (const file of templates.files) {
+      editedByPath.set(file.path, file.newContent);
+    }
 
     // Stage 4: constrained model residuals, only with a live consent grant.
     let modelVersion: string | undefined;
     let modelInputTokens = 0;
     let modelOutputTokens = 0;
     let residualCount = 0;
+    const residualRuleIdsByPath = new Map<string, Set<string>>();
     const unresolvedIds = new Set(deterministic.unpatchedFindingIds);
+    for (const findingId of templates.patchedFindingIds) {
+      unresolvedIds.delete(findingId);
+    }
     const modelConfigured = Boolean(process.env.OPENAI_API_KEY?.trim());
     if (packet.modelProcessingAllowed && modelConfigured && unresolvedIds.size > 0) {
       const consent = await controlPlane<{
@@ -309,6 +382,7 @@ export const patchRun = task({
       }>(new URL(`${runPath}/model-consent`, baseUrl), { method: "POST" });
       if (consent.allowed && consent.policyVersion) {
         const candidates: UnresolvedCandidate[] = [];
+        const candidateFindingIds = new Map<string, string>();
         for (const finding of scopedFindings) {
           if (candidates.length >= MAX_MODEL_CANDIDATES) break;
           if (!unresolvedIds.has(finding.id)) continue;
@@ -320,8 +394,13 @@ export const patchRun = task({
             finding.location.start,
             finding.location.end,
           );
+          const candidateId = safeManifestId(
+            "c",
+            candidates.length,
+            finding.ruleId,
+          );
           candidates.push({
-            id: safeManifestId("c", candidates.length, finding.ruleId),
+            id: candidateId,
             ruleId: finding.ruleId,
             path: finding.path,
             snippet: bounded.snippet,
@@ -329,6 +408,7 @@ export const patchRun = task({
             end: bounded.end,
             localConventions: [],
           });
+          candidateFindingIds.set(candidateId, finding.id);
         }
         if (candidates.length > 0) {
           try {
@@ -355,6 +435,19 @@ export const patchRun = task({
             for (const edit of result.output.edits) {
               const updated = working.get(edit.path);
               if (updated !== undefined) editedByPath.set(edit.path, updated);
+              const findingId = candidateFindingIds.get(edit.candidateId);
+              if (findingId) {
+                unresolvedIds.delete(findingId);
+                const finding = scopedFindings.find(
+                  (candidate) => candidate.id === findingId,
+                );
+                if (finding) {
+                  const ruleIds =
+                    residualRuleIdsByPath.get(edit.path) ?? new Set<string>();
+                  ruleIds.add(finding.ruleId);
+                  residualRuleIdsByPath.set(edit.path, ruleIds);
+                }
+              }
             }
           } catch (error) {
             // A refusal, malformed output, or outage leaves the deterministic
@@ -375,14 +468,22 @@ export const patchRun = task({
       const deterministicEntry = deterministic.files.find(
         (entry) => entry.path === path,
       );
+      const templateEntry = templates.files.find(
+        (entry) => entry.path === path,
+      );
       files.push({
         path,
         originalContent,
         newContent,
-        ruleIds: deterministicEntry?.ruleIds ?? [],
-        rationale: deterministicEntry?.rationale ?? [
-          "Constrained residual edit inside a detected candidate range.",
-        ],
+        ruleIds:
+          deterministicEntry?.ruleIds ??
+          templateEntry?.ruleIds ??
+          [...(residualRuleIdsByPath.get(path) ?? [])],
+        rationale:
+          deterministicEntry?.rationale ??
+          templateEntry?.rationale ?? [
+            "Constrained residual edit inside a detected candidate range.",
+          ],
       });
     }
 
@@ -431,6 +532,7 @@ export const patchRun = task({
     }
 
     let sandboxDestroyedAt: string | undefined;
+    let sandboxCleanupComplete = true;
     let sandboxSeconds = 0;
     if (!sandboxConfigured || files.length === 0) {
       for (const command of commands) {
@@ -454,11 +556,12 @@ export const patchRun = task({
           repository: packet.repository,
           ref: packet.baseSha,
         });
-        const sandboxResult = await new E2BSandboxRunner().run({
-          phase: "prepare-and-validate",
+        const sandboxResult = await new E2BSandboxRunner().prepareAndValidate({
           archive,
           archiveFormat: "zip",
-          commands,
+          dependencyFiles: dependencyPreparationFiles(source.files),
+          installCommand: commands[0] as SandboxCommand,
+          validationCommands: commands.slice(1),
           runId: payload.runId,
           overlayFiles: files.map((file) => ({
             path: file.path,
@@ -466,6 +569,7 @@ export const patchRun = task({
           })),
         });
         sandboxDestroyedAt = sandboxResult.destroyedAt;
+        sandboxCleanupComplete = sandboxResult.destroyed;
         for (const result of sandboxResult.results) {
           validation.push(mapSandboxResult(result));
           if (result.output.length > 0) {
@@ -478,6 +582,7 @@ export const patchRun = task({
           }
         }
       } catch (error) {
+        sandboxCleanupComplete = false;
         for (const command of commands) {
           validation.push({
             category: command.category,
@@ -506,9 +611,7 @@ export const patchRun = task({
         : "affected",
       confidence: confidenceScore(finding.confidence),
       rationale: finding.message,
-      citationArtifactIds: packet.spec.sourceArtifacts.map(
-        (artifact) => artifact.id,
-      ),
+      citationArtifactIds: citationArtifactIds(packet, [finding.ruleId]),
     }));
     const manifestEdits = files.map((file, index) => ({
       id: safeManifestId("e", index, file.ruleIds[0] ?? "residual"),
@@ -517,11 +620,21 @@ export const patchRun = task({
       beforeSha256: sha256(file.originalContent),
       afterSha256: sha256(file.newContent),
       transformation:
-        file.ruleIds.length > 0 ? "deterministic_codemod" : "model_residual",
+        file.ruleIds.some(
+          (ruleId) =>
+            packet.spec.changes.find((change) => change.id === ruleId)
+              ?.transformation.kind === "parameterized_template",
+        )
+          ? "parameterized_template"
+          : file.ruleIds.some(
+                (ruleId) =>
+                  packet.spec.changes.find((change) => change.id === ruleId)
+                    ?.transformation.kind === "model_residual",
+              )
+            ? "model_residual"
+            : "deterministic_codemod",
       rationale: file.rationale.join(" ").slice(0, 4_000) || "Deterministic migration edit.",
-      citationArtifactIds: packet.spec.sourceArtifacts.map(
-        (artifact) => artifact.id,
-      ),
+      citationArtifactIds: citationArtifactIds(packet, file.ruleIds),
     }));
 
     await controlPlane<{ state: string }>(
@@ -560,14 +673,28 @@ export const patchRun = task({
           validationLogs,
           versions: {
             detector: stripeAnalyzerVersion,
-            transformer: stripeTransformerVersion,
+            transformer: `${stripeTransformerVersion}+${parameterizedTemplateTransformerVersion}`,
             ...(modelVersion ? { model: modelVersion } : {}),
+            ...(modelVersion
+              ? {
+                  prompt: [
+                    MODEL_RESIDUAL_PROMPT_VERSION,
+                    ...new Set(
+                      packet.spec.changes.flatMap((change) =>
+                        change.transformation.kind === "model_residual"
+                          ? [change.transformation.promptVersion ?? "unversioned"]
+                          : [],
+                      ),
+                    ),
+                  ].join("+"),
+                }
+              : {}),
             sandboxImage: sandboxConfigured
               ? (process.env.E2B_TEMPLATE_ID?.trim() ?? "unconfigured")
               : `syntax-only:${syntaxValidatorVersion}`,
           },
           executionPolicy: {
-            network: sandboxConfigured ? "registry_only" : "none",
+            network: "none",
             allowedHosts: [],
             cpuCount: 0,
             memoryMiB: 0,
@@ -587,7 +714,7 @@ export const patchRun = task({
               ? { sandboxDestroyedAt }
               : {}),
             sourceDeletedAt: new Date().toISOString(),
-            complete: true,
+            complete: sandboxCleanupComplete,
           },
         }),
       },

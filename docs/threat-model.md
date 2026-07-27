@@ -57,6 +57,8 @@ Controls:
 - Mint repository-scoped GitHub tokens just in time.
 - The trusted gateway transfers content; sandboxes never clone with tokens.
 - Pass no secrets to a sandbox.
+- The assessment sandbox has explicit IPv4 and IPv6 deny-all egress and
+  receives only normalized source paths/content plus a trusted indexer.
 - Disable package lifecycle scripts.
 - Offline validation and explicit registry-only dependency preparation.
 - Send no credentials or direct tools to the model.
@@ -84,6 +86,8 @@ unbounded resources.
 Controls:
 
 - No repository code execution during analysis.
+- TypeScript syntax trees are created in the offline analyzer; module imports,
+  package scripts, and source top-level statements are never evaluated.
 - Install only from an allowlist with `--ignore-scripts`.
 - Validation commands come from a narrow package-script grammar.
 - Secure E2B sandboxes, non-secret environment, restricted egress, process/file/
@@ -122,12 +126,31 @@ Risk: source archives, sandboxes, diffs, or logs survive beyond policy.
 
 Controls:
 
-- Source is not persisted in the assessment alpha.
-- Sandbox destruction belongs in `finally`.
+- Assessment source is not persisted by the control plane.
+- Sandbox destruction runs in `finally` and is recorded in the run manifest.
 - Artifact records carry expiry and lifecycle state.
-- Deletion jobs are durable and auditable.
-- Required completion work: interrupted-run sweeper, 24-hour source hard TTL,
-  30-day customer artifact expiry, deletion verification, and customer erasure.
+- The hourly sweeper fails interrupted runs after 24 hours, queues expired
+  source-derived material, and atomically claims deletion work.
+- Object deletion is verified before completion; failures back off and
+  dead-letter after eight attempts.
+- Customer admins and approvers can export retained migration metadata and
+  request early erasure from the product.
+
+### Provider artifact SSRF and parser abuse
+
+Risk: a provider URL targets internal infrastructure, redirects to a private
+address, returns an oversized body, or supplies parser-exhaustion input.
+
+Controls:
+
+- HTTPS standard port only; no URL credentials.
+- Reject localhost, private/reserved IPs, internal hostname suffixes, and DNS
+  answers containing any non-public address.
+- Revalidate every bounded redirect.
+- Enforce transport, source, extracted-text, page, image, alias, and timeout
+  limits.
+- Parse HTML without executing active content and never execute provider code.
+- Encrypt raw and extracted evidence before object storage.
 
 ## Security release gates
 
