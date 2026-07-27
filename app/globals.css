@@ -2948,6 +2948,45 @@ pre,
   margin-top: 0;
 }
 
+.github-install-handoff .brand-mark {
+  margin-bottom: 18px;
+}
+
+.handoff-permissions {
+  display: grid;
+  gap: 0;
+  margin: 24px 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.handoff-permissions > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 20px;
+  padding: 11px 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.handoff-permissions > div:last-child {
+  border-bottom: 0;
+}
+
+.handoff-permissions dt {
+  color: var(--muted);
+}
+
+.handoff-permissions dd {
+  margin: 0;
+  font-weight: 650;
+}
+
+.handoff-actions {
+  display: flex;
+  gap: 10px;
+}
+
 .organization-choice {
   display: grid;
   gap: 10px;

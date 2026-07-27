@@ -1,10 +1,7 @@
 import { requireAuthenticatedActor } from "@/lib/auth/actor";
 import { resolveTenant } from "@/lib/data/control-plane";
 import { DomainError } from "@/lib/domain/errors";
-import {
-  githubInstallUrl,
-  type GitHubAppKind,
-} from "@/lib/integrations/github";
+import type { GitHubAppKind } from "@/lib/integrations/github";
 import { readRequestObject } from "@/lib/http/responses";
 import { integrationReadiness } from "@/lib/platform/config";
 import { assertSameOrigin } from "@/lib/security/requests";
@@ -61,7 +58,15 @@ export async function POST(
       organizationId: tenant.workspace.organizationId,
       appKind: kind,
     });
-    return Response.redirect(githubInstallUrl(kind, state), 303);
+    return Response.redirect(
+      new URL(
+        `/github/${encodeURIComponent(
+          kind,
+        )}/install?state=${encodeURIComponent(state)}`,
+        request.url,
+      ),
+      303,
+    );
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "GitHub setup could not start.";

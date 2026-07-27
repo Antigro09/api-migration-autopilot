@@ -199,3 +199,62 @@ export function WorkspaceDirectory({
     </main>
   );
 }
+
+export function GitHubInstallHandoff({
+  kind,
+  organizationName,
+  installUrl,
+  backHref,
+}: {
+  kind: "scanner" | "patcher";
+  organizationName: string;
+  installUrl: string;
+  backHref: string;
+}) {
+  const scanner = kind === "scanner";
+  return (
+    <main className="onboarding-shell">
+      <section className="onboarding-card github-install-handoff">
+        <span className="brand-mark" aria-hidden="true">
+          GH
+        </span>
+        <p className="eyebrow">GitHub permission handoff</p>
+        <h1>Continue to the {scanner ? "Scanner" : "Patcher"} App</h1>
+        <p>
+          You are connecting <strong>{organizationName}</strong>. GitHub will
+          show the final repository selection before anything changes.
+        </p>
+        <dl className="handoff-permissions">
+          <div>
+            <dt>Metadata</dt>
+            <dd>Read</dd>
+          </div>
+          <div>
+            <dt>Contents</dt>
+            <dd>{scanner ? "Read" : "Read / write"}</dd>
+          </div>
+          <div>
+            <dt>Pull requests</dt>
+            <dd>{scanner ? "No access" : "Read / write"}</dd>
+          </div>
+          <div>
+            <dt>Workflows</dt>
+            <dd>No access</dd>
+          </div>
+        </dl>
+        <div className="handoff-actions">
+          <a className="button button-primary" href={installUrl}>
+            Continue to GitHub
+          </a>
+          <a className="button button-secondary" href={backHref}>
+            Cancel
+          </a>
+        </div>
+        <p className="fine-print">
+          The signed setup request expires after 10 minutes and is bound to
+          your account and organization.
+        </p>
+      </section>
+    </main>
+  );
+}

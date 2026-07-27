@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { WorkspaceDirectory } from "../app/components/onboarding";
+import {
+  GitHubInstallHandoff,
+  WorkspaceDirectory,
+} from "../app/components/onboarding";
 import { ProductShell } from "../app/components/product-shell";
 import { appHref } from "../app/components/ui";
 import { MODEL_CONSENT_DISCLOSURE } from "../lib/domain";
@@ -89,4 +92,24 @@ test("operator workspace directory lists real tenants and an empty-tenant creato
   assert.match(markup, /action="\/api\/bootstrap"/);
   assert.match(markup, /Creates an empty, auditable tenant/);
   assert.doesNotMatch(markup, /mock funnel|seeded results/i);
+});
+
+test("GitHub setup uses an explicit signed handoff instead of a brittle cross-site POST redirect", () => {
+  const markup = renderToStaticMarkup(
+    <GitHubInstallHandoff
+      kind="scanner"
+      organizationName="Fixture Customer"
+      installUrl="https://github.com/apps/scanner/installations/new?state=signed"
+      backHref="/?view=migrations&organization=org_customer"
+    />,
+  );
+
+  assert.match(markup, /Continue to the Scanner App/);
+  assert.match(markup, /Metadata/);
+  assert.match(markup, /Contents/);
+  assert.match(
+    markup,
+    /href="https:\/\/github\.com\/apps\/scanner\/installations\/new\?state=signed"/,
+  );
+  assert.match(markup, /expires after 10 minutes/);
 });
