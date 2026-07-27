@@ -5,6 +5,7 @@ export type DomainErrorCode =
   | "NOT_FOUND"
   | "INVALID_STATE_TRANSITION"
   | "CONCURRENT_MODIFICATION"
+  | "RATE_LIMITED"
   | "AUDIT_CHAIN_INVALID";
 
 export class DomainError extends Error {

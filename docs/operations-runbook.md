@@ -91,11 +91,44 @@ Scanner-connected state and retains the infrastructure category.
 - Webhook: replay the original delivery; delivery deduplication prevents
   duplicate effects.
 - Assessment: use the product command after the active run is terminal.
-- Trigger result callback: safe to retry. Completed runs return an
-  already-completed work packet.
+- Trigger result callback: safe to retry. A durable per-run receipt returns the
+  original response for the exact completed result, blocks concurrent duplicate
+  processing, and rejects any conflicting result.
 - Branch/PR publication: use the same run. The gateway detects the existing
   branch and draft PR and never force-pushes.
 - Never change run/spec IDs or hashes to make a retry pass.
+- Use the Internal operations **Safe retry** command only for a terminal
+  infrastructure failure. It rechecks the active GitHub installation and exact
+  default-branch commit, creates a new immutable run, and preserves the failed
+  run. Runs with a persisted or approved patch cannot use this path.
+
+## Support access
+
+Support has no source access by default.
+
+1. An internal operator requests one exact run, states the customer-visible
+   purpose, and selects 30 minutes to 24 hours.
+2. A customer admin or approver approves or denies the request in Policies.
+3. An approval creates an exact-run grant whose expiry cannot exceed 24 hours.
+4. The operator may download only artifacts on that run. Every read repeats
+   tenant, membership, artifact-lifecycle, and grant-expiry checks and appends
+   an audit event.
+5. The customer may revoke immediately; the operator may cancel a pending
+   request. Revoked or expired grants fail closed.
+
+Never copy downloaded material into tickets, telemetry, or incident systems.
+
+## Observability and alerts
+
+`TELEMETRY_HASH_SALT` is required before any telemetry provider is enabled.
+OpenTelemetry, Sentry, and PostHog receive only allowlisted metadata with
+one-way organization/run/correlation hashes. A forbidden or unknown field is
+discarded before transport. Telemetry outages do not fail product commands.
+
+Internal operations persists redacted alerts for workflow failures, sandbox
+cleanup failures, deletion deadline risk/dead letters, and publication or
+webhook processing failures. Acknowledge and resolve alerts in the product;
+actions are attributed and audited.
 
 ## Incident response
 
@@ -165,8 +198,8 @@ FROM deletion_jobs WHERE organization_id = ? AND status <> 'completed';
 ```
 
 Any row in `deletion_jobs` with `status = 'failed'` is a retention incident:
-investigate the object storage error, resolve it, then reset the job to
-`pending` with `next_attempt_at` set to now so the next sweep retries it.
+investigate the object-storage error, resolve it, then use the audited
+**Requeue deletion** command in Internal operations. Do not edit the row.
 
 If the schedule is unavailable, run one pass manually:
 

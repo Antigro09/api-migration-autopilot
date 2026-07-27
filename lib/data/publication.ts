@@ -8,12 +8,16 @@ import {
   type TenantContext,
 } from "@/lib/domain";
 import { DomainError } from "@/lib/domain/errors";
-import { GitHubAppGateway } from "@/lib/integrations/github";
+import {
+  GitHubAppGateway,
+  GitHubIntegrationError,
+} from "@/lib/integrations/github";
 import type { GitHubGateway } from "@/lib/integrations/github";
 import type { FileEdit } from "@/lib/migration/contracts";
 import { createPatchHash } from "@/lib/migration/patch-security";
 import { readRunArtifact, storeRunArtifact } from "./artifacts";
 import { appendAuditEvent } from "./control-plane";
+import { recordOperationalAlert } from "./alerts";
 
 export type ApprovalIntent = "open-draft-pr";
 
@@ -33,6 +37,13 @@ export type PatchRecord = {
     fileCount?: number;
     unresolvedFindingIds?: string[];
   };
+};
+
+export type PatchReviewFileRecord = {
+  artifactId: string;
+  path: string;
+  additions: number;
+  deletions: number;
 };
 
 type RunRecord = {
@@ -265,6 +276,154 @@ export async function readPersistedPatch(
     );
   }
   return { record, files, recomputedSha256 };
+}
+
+/**
+ * Lists only encrypted-artifact metadata. No source content is decrypted while
+ * the review page is rendered.
+ */
+export async function listPatchReviewFiles(
+  organizationId: string,
+  runId: string,
+): Promise<PatchReviewFileRecord[]> {
+  await ensureDatabaseSchema();
+  const now = new Date().toISOString();
+  const rows = await getD1()
+    .prepare(
+      `SELECT
+         prf.artifact_id AS artifactId,
+         prf.path,
+         prf.additions,
+         prf.deletions
+       FROM patch_review_files prf
+       JOIN artifacts a
+         ON a.id = prf.artifact_id
+        AND a.organization_id = prf.organization_id
+       JOIN patches p
+         ON p.id = prf.patch_id
+        AND p.organization_id = prf.organization_id
+        AND p.run_id = prf.run_id
+       WHERE prf.organization_id = ? AND prf.run_id = ?
+         AND a.lifecycle_state = 'active'
+         AND (a.expires_at IS NULL OR a.expires_at > ?)
+       ORDER BY prf.path ASC
+       LIMIT 500`,
+    )
+    .bind(organizationId, runId, now)
+    .all<PatchReviewFileRecord>();
+  return rows.results.map((row) => ({
+    ...row,
+    additions: Number(row.additions),
+    deletions: Number(row.deletions),
+  }));
+}
+
+function parsePatchReviewFile(
+  plaintext: string,
+  expectedPath: string,
+): FileEdit {
+  let value: unknown;
+  try {
+    value = JSON.parse(plaintext) as unknown;
+  } catch {
+    throw new DomainError(
+      "VALIDATION_FAILED",
+      "The selected patch file artifact is not readable JSON.",
+    );
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new DomainError(
+      "VALIDATION_FAILED",
+      "The selected patch file artifact is malformed.",
+    );
+  }
+  const record = value as Record<string, unknown>;
+  const stringList = (candidate: unknown): string[] | null =>
+    Array.isArray(candidate) &&
+    candidate.length <= 50 &&
+    candidate.every(
+      (entry) => typeof entry === "string" && entry.length <= 2_000,
+    )
+      ? [...candidate]
+      : null;
+  const ruleIds = stringList(record.ruleIds);
+  const rationale = stringList(record.rationale);
+  if (
+    record.path !== expectedPath ||
+    typeof record.originalContent !== "string" ||
+    typeof record.newContent !== "string" ||
+    record.originalContent.includes("\0") ||
+    record.newContent.includes("\0") ||
+    new TextEncoder().encode(record.originalContent).byteLength > 1_048_576 ||
+    new TextEncoder().encode(record.newContent).byteLength > 1_048_576 ||
+    !ruleIds ||
+    !rationale
+  ) {
+    throw new DomainError(
+      "VALIDATION_FAILED",
+      "The selected patch file artifact does not match its metadata.",
+    );
+  }
+  return {
+    path: expectedPath,
+    originalContent: record.originalContent,
+    newContent: record.newContent,
+    ruleIds,
+    rationale,
+  };
+}
+
+/**
+ * Decrypts exactly one selected file after proving the artifact belongs to the
+ * requested tenant, run, and persisted patch row.
+ */
+export async function readPersistedPatchFile(input: {
+  organizationId: string;
+  runId: string;
+  path: string;
+}): Promise<FileEdit> {
+  await ensureDatabaseSchema();
+  if (
+    !input.path ||
+    input.path.length > 1_024 ||
+    input.path.includes("\\") ||
+    input.path.includes("\0") ||
+    input.path.startsWith("/") ||
+    input.path.toLowerCase().startsWith(".github/workflows/") ||
+    input.path.split("/").some((segment) => ["", ".", ".."].includes(segment))
+  ) {
+    throw new DomainError("VALIDATION_FAILED", "Patch file path is invalid.");
+  }
+  const now = new Date().toISOString();
+  const record = await getD1()
+    .prepare(
+      `SELECT prf.artifact_id AS artifactId
+       FROM patch_review_files prf
+       JOIN patches p
+         ON p.id = prf.patch_id
+        AND p.organization_id = prf.organization_id
+        AND p.run_id = prf.run_id
+       JOIN artifacts a
+         ON a.id = prf.artifact_id
+        AND a.organization_id = prf.organization_id
+       WHERE prf.organization_id = ? AND prf.run_id = ? AND prf.path = ?
+         AND a.lifecycle_state = 'active'
+         AND (a.expires_at IS NULL OR a.expires_at > ?)
+       LIMIT 1`,
+    )
+    .bind(input.organizationId, input.runId, input.path, now)
+    .first<{ artifactId: string }>();
+  if (!record) {
+    throw new DomainError(
+      "NOT_FOUND",
+      "The selected patch file is not available for this run.",
+    );
+  }
+  const plaintext = await readRunArtifact({
+    organizationId: input.organizationId,
+    artifactId: record.artifactId,
+  });
+  return parsePatchReviewFile(plaintext, input.path);
 }
 
 export async function approvePatch(input: {
@@ -556,34 +715,92 @@ export async function publishApprovedPatch(input: {
     );
   }
 
+  const database = getD1();
+  const persistPublicationFailure = async (error: unknown): Promise<void> => {
+    const integrationError =
+      error instanceof GitHubIntegrationError ? error : null;
+    const failureCategory =
+      integrationError?.category === "permission"
+        ? "permission"
+        : integrationError?.category === "stale_base" ||
+            integrationError?.category === "branch_conflict"
+          ? "stale_base"
+          : "infrastructure";
+    const failureCode =
+      integrationError?.failureCode ?? "github_publication_failed";
+    await database
+      .prepare(
+        `UPDATE migration_runs
+         SET state = 'approved', failure_category = ?,
+             failure_code = ?, updated_at = ?
+         WHERE id = ? AND organization_id = ?
+           AND state IN ('approved', 'publishing')`,
+      )
+      .bind(
+        failureCategory,
+        failureCode,
+        isoNow(),
+        input.runId,
+        input.tenant.organizationId,
+      )
+      .run();
+    await appendAuditEvent({
+      organizationId: input.tenant.organizationId,
+      aggregateType: "run",
+      aggregateId: input.runId,
+      action: "patch.draft_pr_publication_failed",
+      actorMembershipId: input.tenant.membershipId,
+      payload: { failureCategory, failureCode },
+    });
+    await recordOperationalAlert({
+      organizationId: input.tenant.organizationId,
+      runId: input.runId,
+      severity: "critical",
+      code: "github.draft_pr_publication_failed",
+      eventName: "workflow.failed",
+      metadata: {
+        provider: "github",
+        integration: "github_patcher",
+        operation: "draft_pr_publication",
+        outcome: "failed",
+        failure_category: failureCategory,
+        alert_code: failureCode,
+        severity: "critical",
+      },
+    }).catch(() => undefined);
+  };
+
   const gateway = input.gateway ?? new GitHubAppGateway();
   // Re-read the branch head immediately before the write; a moved default
   // branch invalidates the approval rather than silently rebasing.
-  const currentSha = await gateway.getBranchSha({
-    appKind: "patcher",
-    installationId: Number(run.patcherInstallationId),
-    repositoryId: Number(run.githubRepositoryId),
-    owner: run.owner,
-    repository: run.repository,
-    branch: run.defaultBranch,
-  });
+  let currentSha: string;
+  try {
+    currentSha = await gateway.getBranchSha({
+      appKind: "patcher",
+      installationId: Number(run.patcherInstallationId),
+      repositoryId: Number(run.githubRepositoryId),
+      owner: run.owner,
+      repository: run.repository,
+      branch: run.defaultBranch,
+    });
+  } catch (error) {
+    await persistPublicationFailure(error);
+    throw error;
+  }
   if (currentSha.toLowerCase() !== run.baseSha.toLowerCase()) {
-    await getD1()
-      .prepare(
-        `UPDATE migration_runs
-         SET failure_category = 'stale_base', failure_code = 'default_branch_moved',
-             updated_at = ?
-         WHERE id = ? AND organization_id = ?`,
-      )
-      .bind(isoNow(), input.runId, input.tenant.organizationId)
-      .run();
+    await persistPublicationFailure(
+      new GitHubIntegrationError(
+        "default_branch_moved",
+        "stale_base",
+        "The default branch moved after approval.",
+      ),
+    );
     throw new DomainError(
       "CONCURRENT_MODIFICATION",
       "The default branch moved after approval. Generate and approve a fresh patch against the current commit.",
     );
   }
 
-  const database = getD1();
   await database
     .prepare(
       `UPDATE migration_runs SET state = 'publishing', updated_at = ?
@@ -615,15 +832,7 @@ export async function publishApprovedPatch(input: {
       }),
     });
   } catch (error) {
-    await database
-      .prepare(
-        `UPDATE migration_runs
-         SET state = 'approved', failure_category = 'permission',
-             failure_code = 'publication_failed', updated_at = ?
-         WHERE id = ? AND organization_id = ? AND state = 'publishing'`,
-      )
-      .bind(isoNow(), input.runId, input.tenant.organizationId)
-      .run();
+    await persistPublicationFailure(error);
     throw error;
   }
 

@@ -19,20 +19,26 @@ const {
   requestPatch,
   submitPatchResult,
 } = await import("@/lib/data/patches");
-const { approvePatch, publishApprovedPatch, readPersistedPatch } = await import(
-  "@/lib/data/publication"
-);
+const {
+  approvePatch,
+  listPatchReviewFiles,
+  publishApprovedPatch,
+  readPersistedPatch,
+  readPersistedPatchFile,
+} = await import("@/lib/data/publication");
 const { customerPatchReview, customerWorkspaceData, runStatus } = await import(
   "@/lib/data/customer"
 );
 const { providerDashboard } = await import("@/lib/data/control-plane");
 const { completeAssessment } = await import("@/lib/data/assessments");
+const { processWorkflowResult } = await import("@/lib/data/workflow-results");
 const { readRunArtifact, storeRunArtifact } = await import(
   "@/lib/data/artifacts"
 );
 const { sweepRetention } = await import("@/lib/data/retention");
 const { MODEL_CONSENT_POLICY_VERSION } = await import("@/lib/domain");
 const { createPatchHash } = await import("@/lib/migration/patch-security");
+const { GitHubIntegrationError } = await import("@/lib/integrations/github");
 const { parsePatchRunResult } = await import(
   "@/lib/migration/patch-validation"
 );
@@ -157,6 +163,59 @@ async function buildPatchResult(
   });
 }
 
+async function buildTwoFilePatchResult(tenant: SeededTenant) {
+  const originalOther = "export const amount = Stripe.Decimal;\n";
+  const patchedOther = "export const amount = Decimal;\n";
+  const files = [
+    {
+      path: "src/billing.ts",
+      originalContent: ORIGINAL,
+      newContent: PATCHED,
+      ruleIds: ["stripe.constructor.new"],
+      rationale: ["Instantiate the v22 ES class export with new."],
+    },
+    {
+      path: "src/other.ts",
+      originalContent: originalOther,
+      newContent: patchedOther,
+      ruleIds: ["stripe.decimal.import"],
+      rationale: ["Use the supported Decimal export."],
+    },
+  ];
+  const base = await buildPatchResult(tenant);
+  return parsePatchRunResult({
+    ...base,
+    patchSha256: await createPatchHash(tenant.baseSha, files),
+    files,
+    findings: [
+      ...base.findings,
+      {
+        id: "f2.stripe.decimal.import",
+        ruleId: "stripe.decimal.import",
+        filePath: "src/other.ts",
+        fileSha256: sha256(originalOther),
+        classification: "affected",
+        confidence: 1,
+        rationale: "Use the supported Decimal export.",
+        citationArtifactIds: ["stripe-node-v22-guide"],
+      },
+    ],
+    edits: [
+      ...base.edits,
+      {
+        id: "e2.stripe.decimal.import",
+        ruleId: "stripe.decimal.import",
+        filePath: "src/other.ts",
+        beforeSha256: sha256(originalOther),
+        afterSha256: sha256(patchedOther),
+        transformation: "deterministic_codemod",
+        rationale: "Use the supported Decimal export.",
+        citationArtifactIds: ["stripe-node-v22-guide"],
+      },
+    ],
+  });
+}
+
 async function expectDomainError(
   operation: Promise<unknown>,
   code: string,
@@ -175,6 +234,55 @@ async function expectDomainError(
 
 test.beforeEach(() => {
   resetControlPlane();
+});
+
+test("workflow result receipts serialize concurrent delivery and replay the exact response", async () => {
+  const tenant = await seedTenant();
+  let release: (() => void) | undefined;
+  let claimed: (() => void) | undefined;
+  const claimedPromise = new Promise<void>((resolve) => {
+    claimed = resolve;
+  });
+  const releasePromise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let processCalls = 0;
+  const input = {
+    runId: tenant.assessmentRunId,
+    organizationId: tenant.customerOrganizationId,
+    kind: "assessment" as const,
+    payload: { result: "exact" },
+  };
+  const first = processWorkflowResult({
+    ...input,
+    process: async () => {
+      processCalls += 1;
+      claimed?.();
+      await releasePromise;
+      return { completed: true };
+    },
+  });
+  await claimedPromise;
+  await expectDomainError(
+    processWorkflowResult({
+      ...input,
+      process: async () => ({ completed: false }),
+    }),
+    "CONCURRENT_MODIFICATION",
+  );
+  release?.();
+  assert.deepEqual(await first, { completed: true });
+  assert.deepEqual(
+    await processWorkflowResult({
+      ...input,
+      process: async () => {
+        processCalls += 1;
+        return { completed: false };
+      },
+    }),
+    { completed: true },
+  );
+  assert.equal(processCalls, 1);
 });
 
 test("assessment completion accepts the run-bound spec and persists encrypted execution evidence", async () => {
@@ -203,7 +311,7 @@ test("assessment completion accepts the run-bound spec and persists encrypted ex
       .bind(tenant.repositoryMigrationId, tenant.customerOrganizationId),
   ]);
   const destroyedAt = new Date().toISOString();
-  await completeAssessment({
+  const assessmentResult = {
     runId: tenant.assessmentRunId,
     assessment: {
       specId: tenant.specId,
@@ -232,7 +340,8 @@ test("assessment completion accepts the run-bound spec and persists encrypted ex
       sandboxDestroyedAt: destroyedAt,
       sourceDeletedAt: destroyedAt,
     },
-  });
+  } satisfies Parameters<typeof completeAssessment>[0];
+  await completeAssessment(assessmentResult);
   const run = await database
     .prepare(
       `SELECT state, manifest
@@ -265,6 +374,38 @@ test("assessment completion accepts the run-bound spec and persists encrypted ex
   assert.deepEqual(
     workspace.selectedMigration?.assessmentSummary?.scannedPaths,
     ["src/billing.ts"],
+  );
+
+  const beforeReplay = await database
+    .prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM artifacts WHERE run_id = ?) AS artifacts,
+        (SELECT COUNT(*) FROM audit_events
+          WHERE aggregate_id = ? AND action = 'assessment.completed') AS audits`,
+    )
+    .bind(tenant.assessmentRunId, tenant.assessmentRunId)
+    .first<{ artifacts: number; audits: number }>();
+  await completeAssessment(assessmentResult);
+  const afterReplay = await database
+    .prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM artifacts WHERE run_id = ?) AS artifacts,
+        (SELECT COUNT(*) FROM audit_events
+          WHERE aggregate_id = ? AND action = 'assessment.completed') AS audits`,
+    )
+    .bind(tenant.assessmentRunId, tenant.assessmentRunId)
+    .first<{ artifacts: number; audits: number }>();
+  assert.deepEqual(afterReplay, beforeReplay);
+
+  await expectDomainError(
+    completeAssessment({
+      ...assessmentResult,
+      assessment: {
+        ...assessmentResult.assessment,
+        scannedFiles: ["src/billing.ts", "src/other.ts"],
+      },
+    }),
+    "CONCURRENT_MODIFICATION",
   );
 });
 
@@ -428,6 +569,145 @@ test("a submitted patch persists an encrypted artifact, a parsed manifest, and a
   assert.equal(manifest.patch.sha256, result.patchSha256);
   assert.match(manifest.audit.rootHash, /^[a-f0-9]{64}$/);
   assert.deepEqual(manifest.allowedPaths, ["src/billing.ts"]);
+
+  const beforeReplay = await getD1()
+    .prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM patches WHERE run_id = ?) AS patches,
+        (SELECT COUNT(*) FROM patch_review_files WHERE run_id = ?) AS files,
+        (SELECT COUNT(*) FROM artifacts WHERE run_id = ?) AS artifacts,
+        (SELECT COUNT(*) FROM audit_events
+          WHERE aggregate_id = ? AND action = 'patch.generated') AS audits`,
+    )
+    .bind(runId, runId, runId, runId)
+    .first<{
+      patches: number;
+      files: number;
+      artifacts: number;
+      audits: number;
+    }>();
+  assert.deepEqual(await submitPatchResult({ runId, result }), submitted);
+  const afterReplay = await getD1()
+    .prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM patches WHERE run_id = ?) AS patches,
+        (SELECT COUNT(*) FROM patch_review_files WHERE run_id = ?) AS files,
+        (SELECT COUNT(*) FROM artifacts WHERE run_id = ?) AS artifacts,
+        (SELECT COUNT(*) FROM audit_events
+          WHERE aggregate_id = ? AND action = 'patch.generated') AS audits`,
+    )
+    .bind(runId, runId, runId, runId)
+    .first<{
+      patches: number;
+      files: number;
+      artifacts: number;
+      audits: number;
+    }>();
+  assert.deepEqual(afterReplay, beforeReplay);
+  await expectDomainError(
+    submitPatchResult({
+      runId,
+      result: {
+        ...result,
+        unresolvedFindingIds: ["f1.stripe.constructor.new"],
+      },
+    }),
+    "CONCURRENT_MODIFICATION",
+  );
+});
+
+test("patch review lists metadata without decrypting the aggregate and reads only the selected tenant file", async () => {
+  const tenant = await seedTenant({
+    affectedPaths: ["src/billing.ts", "src/other.ts"],
+  });
+  const runId = await seedPatchRun(tenant);
+  await submitPatchResult({
+    runId,
+    result: await buildTwoFilePatchResult(tenant),
+  });
+
+  const metadata = await listPatchReviewFiles(
+    tenant.customerOrganizationId,
+    runId,
+  );
+  assert.deepEqual(
+    metadata.map((file) => file.path),
+    ["src/billing.ts", "src/other.ts"],
+  );
+  assert.doesNotMatch(JSON.stringify(metadata), /process\.env|Stripe\.Decimal/);
+
+  const aggregate = await getD1()
+    .prepare(
+      "SELECT storage_key AS storageKey FROM artifacts WHERE run_id = ? AND kind = 'patch' LIMIT 1",
+    )
+    .bind(runId)
+    .first<{ storageKey: string }>();
+  assert.ok(aggregate);
+  testBucket.objects.delete(aggregate.storageKey);
+
+  const review = await customerPatchReview(
+    tenant.customerOrganizationId,
+    tenant.repositoryMigrationId,
+  );
+  assert.equal(review?.files.length, 2);
+  assert.doesNotMatch(JSON.stringify(review), /process\.env|Stripe\.Decimal/);
+
+  const selected = await readPersistedPatchFile({
+    organizationId: tenant.customerOrganizationId,
+    runId,
+    path: "src/other.ts",
+  });
+  assert.equal(selected.newContent, "export const amount = Decimal;\n");
+  assert.doesNotMatch(selected.originalContent, /process\.env/);
+
+  const other = await seedTenant();
+  await expectDomainError(
+    readPersistedPatchFile({
+      organizationId: other.customerOrganizationId,
+      runId,
+      path: "src/other.ts",
+    }),
+    "NOT_FOUND",
+  );
+  await expectDomainError(
+    readPersistedPatchFile({
+      organizationId: tenant.customerOrganizationId,
+      runId,
+      path: "src/missing.ts",
+    }),
+    "NOT_FOUND",
+  );
+});
+
+test("an expired selected-file artifact disappears from metadata and fails closed", async () => {
+  const tenant = await seedTenant();
+  const runId = await seedPatchRun(tenant);
+  await submitPatchResult({ runId, result: await buildPatchResult(tenant) });
+
+  const artifact = await getD1()
+    .prepare(
+      "SELECT a.id FROM artifacts a JOIN patch_review_files prf ON prf.artifact_id = a.id WHERE prf.run_id = ? LIMIT 1",
+    )
+    .bind(runId)
+    .first<{ id: string }>();
+  assert.ok(artifact);
+  await getD1()
+    .prepare("UPDATE artifacts SET expires_at = ? WHERE id = ?")
+    .bind(new Date(Date.now() - 1_000).toISOString(), artifact.id)
+    .run();
+
+  assert.deepEqual(
+    await listPatchReviewFiles(tenant.customerOrganizationId, runId),
+    [],
+  );
+  await expectDomainError(
+    readPersistedPatchFile({
+      organizationId: tenant.customerOrganizationId,
+      runId,
+      path: "src/billing.ts",
+    }),
+    "NOT_FOUND",
+  );
 });
 
 test("a patch touching an unauthorized path is never persisted as reviewable work", async () => {
@@ -737,6 +1017,109 @@ test("successful publication finalizes the actual approver and draft PR identity
   });
   assert.equal(retry.existing, true);
   assert.equal(retry.number, 42);
+});
+
+test("publication records stale-base refusal and a redacted operational alert before any write", async () => {
+  const tenant = await seedTenant();
+  const runId = await seedPatchRun(tenant);
+  const result = await buildPatchResult(tenant);
+  await submitPatchResult({ runId, result });
+  await approvePatch({
+    tenant: tenant.tenantFor("approver"),
+    runId,
+    patchHash: result.patchSha256,
+    intent: "open-draft-pr",
+  });
+
+  let writes = 0;
+  await expectDomainError(
+    publishApprovedPatch({
+      tenant: tenant.tenantFor("approver"),
+      runId,
+      gateway: {
+        getBranchSha: async () => "c".repeat(40),
+        publishDraftPullRequest: async () => {
+          writes += 1;
+          throw new Error("must not write");
+        },
+      },
+    }),
+    "CONCURRENT_MODIFICATION",
+  );
+  assert.equal(writes, 0);
+  const persisted = await getD1()
+    .prepare(
+      "SELECT state, failure_category AS failureCategory, failure_code AS failureCode FROM migration_runs WHERE id = ?",
+    )
+    .bind(runId)
+    .first<{
+      state: string;
+      failureCategory: string;
+      failureCode: string;
+    }>();
+  assert.equal(persisted?.state, "approved");
+  assert.equal(persisted?.failureCategory, "stale_base");
+  assert.equal(persisted?.failureCode, "default_branch_moved");
+  const alert = await getD1()
+    .prepare(
+      "SELECT code FROM operational_alerts WHERE organization_id = ? AND run_id = ?",
+    )
+    .bind(tenant.customerOrganizationId, runId)
+    .first<{ code: string }>();
+  assert.equal(alert?.code, "github.draft_pr_publication_failed");
+});
+
+test("publication distinguishes permission failures from infrastructure failures", async () => {
+  for (const scenario of [
+    {
+      expected: "permission",
+      code: "github_http_403",
+      error: new GitHubIntegrationError(
+        "github_http_403",
+        "permission",
+        "GitHub rejected the request with HTTP 403.",
+      ),
+    },
+    {
+      expected: "infrastructure",
+      code: "github_publication_failed",
+      error: new Error("network unavailable"),
+    },
+  ]) {
+    const tenant = await seedTenant();
+    const runId = await seedPatchRun(tenant);
+    const result = await buildPatchResult(tenant);
+    await submitPatchResult({ runId, result });
+    await approvePatch({
+      tenant: tenant.tenantFor("approver"),
+      runId,
+      patchHash: result.patchSha256,
+      intent: "open-draft-pr",
+    });
+
+    await assert.rejects(
+      publishApprovedPatch({
+        tenant: tenant.tenantFor("approver"),
+        runId,
+        gateway: {
+          getBranchSha: async () => tenant.baseSha,
+          publishDraftPullRequest: async () => {
+            throw scenario.error;
+          },
+        },
+      }),
+      scenario.error,
+    );
+    const failure = await getD1()
+      .prepare(
+        "SELECT state, failure_category AS category, failure_code AS code FROM migration_runs WHERE id = ?",
+      )
+      .bind(runId)
+      .first<{ state: string; category: string; code: string }>();
+    assert.equal(failure?.state, "approved");
+    assert.equal(failure?.category, scenario.expected);
+    assert.equal(failure?.code, scenario.code);
+  }
 });
 
 test("provider queries never expose repository-derived detail", async () => {

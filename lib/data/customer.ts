@@ -11,10 +11,13 @@ import {
   parseMigrationSpecV1,
   parseRunManifestV1,
 } from "@/lib/domain";
-import { createFileDiff, type FileDiff } from "@/lib/migration/diff";
 import { activeConsent } from "./consent";
-import { loadPatchRecord, readPersistedPatch } from "./publication";
+import { listPatchReviewFiles, loadPatchRecord } from "./publication";
 import { listRunStages } from "./patches";
+import {
+  customerSupportAccess,
+  type CustomerSupportAccess,
+} from "./support";
 
 export type CustomerRepository = {
   id: string;
@@ -89,6 +92,17 @@ export type CustomerWorkspaceData = {
   selectedMigration: CustomerMigration | null;
   selectedFindings: CustomerFinding[];
   migrationCount: number;
+  supportAccess: CustomerSupportAccess;
+  auditEvents: CustomerAuditEvent[];
+};
+
+export type CustomerAuditEvent = {
+  id: string;
+  action: string;
+  aggregateType: string;
+  aggregateId: string;
+  actorKind: string;
+  occurredAt: string;
 };
 
 type MigrationRow = Omit<CustomerMigration, "assessmentSummary"> & {
@@ -284,6 +298,27 @@ export async function customerWorkspaceData(
         .bind(organizationId, selectedMigration.latestRunId)
         .all<FindingRow>()
     : { results: [] as FindingRow[] };
+  const [supportAccess, auditEvents] = await Promise.all([
+    customerSupportAccess(organizationId),
+    database
+      .prepare(
+        `SELECT
+           ae.id,
+           ae.action,
+           ae.aggregate_type AS aggregateType,
+           ae.aggregate_id AS aggregateId,
+           COALESCE(actor_org.kind, 'system') AS actorKind,
+           ae.occurred_at AS occurredAt
+         FROM audit_events ae
+         LEFT JOIN memberships actor ON actor.id = ae.actor_membership_id
+         LEFT JOIN organizations actor_org ON actor_org.id = actor.organization_id
+         WHERE ae.organization_id = ?
+         ORDER BY ae.occurred_at DESC
+         LIMIT 200`,
+      )
+      .bind(organizationId)
+      .all<CustomerAuditEvent>(),
+  ]);
   return {
     scannerConnected: appKinds.has("scanner"),
     patcherConnected: appKinds.has("patcher"),
@@ -299,6 +334,8 @@ export async function customerWorkspaceData(
       .map(parseFinding)
       .filter((finding): finding is CustomerFinding => Boolean(finding)),
     migrationCount: migrations.length,
+    supportAccess,
+    auditEvents: auditEvents.results,
   };
 }
 
@@ -398,7 +435,6 @@ export type PatchReviewData = {
     source?: string;
   }>;
   files: PatchReviewFile[];
-  selectedDiff: FileDiff | null;
   selectedPath: string | null;
   additions: number;
   deletions: number;
@@ -412,9 +448,8 @@ export type PatchReviewData = {
 };
 
 /**
- * Loads the review surface for a migration. The full patch is only decrypted
- * when a specific file has been selected, so the default view never pulls
- * every stored source file into memory.
+ * Loads metadata and evidence for the review surface without decrypting any
+ * changed file. A separate tenant-scoped endpoint loads one selected file.
  */
 export async function customerPatchReview(
   organizationId: string,
@@ -570,51 +605,33 @@ export async function customerPatchReview(
     kind: "external_model_processing",
   });
 
-  let files: PatchReviewFile[] = [];
-  let selectedDiff: FileDiff | null = null;
-  let resolvedPath: string | null = null;
-  try {
-    const { files: patchFiles } = await readPersistedPatch(
-      organizationId,
-      context.runId,
-    );
-    files = patchFiles.map((file) => {
-      const diff = createFileDiff({
-        path: file.path,
-        originalContent: file.originalContent,
-        newContent: file.newContent,
-      });
-      return {
-        path: file.path,
-        additions: diff.additions,
-        deletions: diff.deletions,
-        ruleIds: editsByPath.get(file.path)?.ruleIds ?? [...file.ruleIds],
-        transformations: editsByPath.get(file.path)?.transformations ?? [],
-        rationale: editsByPath.get(file.path)?.rationale ?? [...file.rationale],
-        evidence: evidenceByPath.get(file.path) ?? [],
-        knownLimitations: [
-          ...new Set(
-            (editsByPath.get(file.path)?.ruleIds ?? file.ruleIds).flatMap(
-              (ruleId) => changesByRuleId.get(ruleId)?.knownLimitations ?? [],
-            ),
+  const reviewFiles = await listPatchReviewFiles(
+    organizationId,
+    context.runId,
+  );
+  const files: PatchReviewFile[] = reviewFiles.map((file) => {
+    const ruleIds = editsByPath.get(file.path)?.ruleIds ?? [];
+    return {
+      path: file.path,
+      additions: file.additions,
+      deletions: file.deletions,
+      ruleIds,
+      transformations: editsByPath.get(file.path)?.transformations ?? [],
+      rationale: editsByPath.get(file.path)?.rationale ?? [],
+      evidence: evidenceByPath.get(file.path) ?? [],
+      knownLimitations: [
+        ...new Set(
+          ruleIds.flatMap(
+            (ruleId) => changesByRuleId.get(ruleId)?.knownLimitations ?? [],
           ),
-        ],
-      };
-    });
-    const chosen =
-      patchFiles.find((file) => file.path === selectedPath) ?? patchFiles[0];
-    if (chosen) {
-      resolvedPath = chosen.path;
-      selectedDiff = createFileDiff({
-        path: chosen.path,
-        originalContent: chosen.originalContent,
-        newContent: chosen.newContent,
-      });
-    }
-  } catch {
-    // An expired or deleted patch artifact leaves the review fail-closed.
-    files = [];
-  }
+        ),
+      ],
+    };
+  });
+  const resolvedPath =
+    files.find((file) => file.path === selectedPath)?.path ??
+    files[0]?.path ??
+    null;
 
   const integrityValid = record.integrityChecks.valid === true;
   const warnRequired =
@@ -636,7 +653,6 @@ export async function customerPatchReview(
     integrityValid,
     integrityIssues: (record.integrityChecks.issues ?? []).slice(0, 50),
     files,
-    selectedDiff,
     selectedPath: resolvedPath,
     additions: record.integrityChecks.additions ?? 0,
     deletions: record.integrityChecks.deletions ?? 0,

@@ -2,9 +2,22 @@ import { AuthenticationRequiredError } from "@/lib/auth/actor";
 import { DomainError } from "@/lib/domain/errors";
 import { IntegrationConfigurationError } from "@/lib/platform/config";
 import { CrossSiteRequestError } from "@/lib/security/requests";
+import { emitTelemetry } from "@/lib/telemetry";
+
+function privateJsonInit(init?: ResponseInit): ResponseInit {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Cache-Control")) {
+    headers.set("Cache-Control", "private, no-store, max-age=0");
+  }
+  if (!headers.has("Pragma")) headers.set("Pragma", "no-cache");
+  if (!headers.has("X-Content-Type-Options")) {
+    headers.set("X-Content-Type-Options", "nosniff");
+  }
+  return { ...init, headers };
+}
 
 export function jsonOk<T>(data: T, init?: ResponseInit): Response {
-  return Response.json({ ok: true, data }, init);
+  return Response.json({ ok: true, data }, privateJsonInit(init));
 }
 
 export function jsonError(
@@ -12,6 +25,7 @@ export function jsonError(
   message: string,
   status: number,
   details?: unknown,
+  init?: Omit<ResponseInit, "status">,
 ): Response {
   return Response.json(
     {
@@ -22,7 +36,7 @@ export function jsonError(
         ...(details === undefined ? {} : { details }),
       },
     },
-    { status },
+    privateJsonInit({ ...init, status }),
   );
 }
 
@@ -45,6 +59,16 @@ export function handleRouteError(error: unknown): Response {
     return jsonError("INVALID_REQUEST", error.message, 400);
   }
   if (error instanceof DomainError) {
+    if (error.code === "RATE_LIMITED") {
+      const retryAfter = Number(error.details?.retryAfterSeconds ?? 60);
+      return jsonError(error.code, error.message, 429, error.details, {
+        headers: {
+          "Retry-After": String(
+            Number.isFinite(retryAfter) ? Math.max(1, retryAfter) : 60,
+          ),
+        },
+      });
+    }
     const status =
       error.code === "FORBIDDEN" || error.code === "TENANT_MISMATCH"
         ? 403
@@ -60,7 +84,18 @@ export function handleRouteError(error: unknown): Response {
   }
 
   const errorId = crypto.randomUUID();
-  console.error("Unhandled API error", { errorId, error });
+  console.error("Unhandled API error", { errorId });
+  void emitTelemetry({
+    name: "api.error",
+    correlationId: errorId,
+    metadata: {
+      error_code: "INTERNAL_ERROR",
+      status_code: 500,
+      severity: "critical",
+      outcome: "failed",
+      operation: "api_unhandled",
+    },
+  });
   return jsonError(
     "INTERNAL_ERROR",
     "The operation could not be completed.",

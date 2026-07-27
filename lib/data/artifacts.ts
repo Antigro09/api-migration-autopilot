@@ -34,6 +34,7 @@ export const RETENTION_FOR_KIND: Record<ArtifactKind, ArtifactRetention> = {
   repository_archive: "run-source",
   affected_snippets: "run-source",
   patch: "customer-review",
+  patch_file: "customer-review",
   validation_log: "customer-review",
   run_manifest: "audit-manifest",
 };

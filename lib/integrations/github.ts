@@ -9,6 +9,23 @@ import type { RepositoryFile } from "@/lib/migration/contracts";
 
 export type GitHubAppKind = "scanner" | "patcher";
 
+export type GitHubFailureCategory =
+  | "permission"
+  | "stale_base"
+  | "branch_conflict"
+  | "infrastructure";
+
+export class GitHubIntegrationError extends Error {
+  constructor(
+    readonly failureCode: string,
+    readonly category: GitHubFailureCategory,
+    message: string,
+  ) {
+    super(message);
+    this.name = "GitHubIntegrationError";
+  }
+}
+
 export type GitHubInstallation = {
   id: number;
   account: {
@@ -227,14 +244,17 @@ async function githubRequest<T>(
   });
   if (options.allowNotFound && response.status === 404) return null;
   if (!response.ok) {
-    const error = (await response.json().catch(() => null)) as
-      | { message?: unknown }
-      | null;
-    const detail =
-      typeof error?.message === "string"
-        ? error.message
-        : `GitHub returned HTTP ${response.status}.`;
-    throw new Error(`GitHub request failed: ${detail}`);
+    const category: GitHubFailureCategory =
+      response.status === 401 || response.status === 403 || response.status === 404
+        ? "permission"
+        : response.status === 409 || response.status === 422
+          ? "branch_conflict"
+          : "infrastructure";
+    throw new GitHubIntegrationError(
+      `github_http_${response.status}`,
+      category,
+      `GitHub rejected the request with HTTP ${response.status}.`,
+    );
   }
   if (response.status === 204) return {} as T;
   return (await response.json()) as T;
@@ -566,7 +586,9 @@ export class GitHubAppGateway implements GitHubGateway {
       { token },
     );
     if (baseRef?.object.sha !== input.baseSha) {
-      throw new Error(
+      throw new GitHubIntegrationError(
+        "default_branch_moved",
+        "stale_base",
         "The default branch changed after approval. Generate and approve a fresh patch.",
       );
     }
@@ -579,6 +601,85 @@ export class GitHubAppGateway implements GitHubGateway {
       { token, allowNotFound: true },
     );
     if (existingRef) {
+      const existingCommit = await githubRequest<{
+        tree: { sha: string };
+        parents: Array<{ sha: string }>;
+      }>(`${repositoryPath}/git/commits/${encodeURIComponent(existingRef.object.sha)}`, {
+        token,
+      });
+      if (
+        !existingCommit ||
+        existingCommit.parents.length !== 1 ||
+        existingCommit.parents[0]?.sha !== input.baseSha
+      ) {
+        throw new GitHubIntegrationError(
+          "existing_branch_not_approved",
+          "branch_conflict",
+          "The migration branch already exists but is not the approved one-commit change.",
+        );
+      }
+      const comparison = await githubRequest<{
+        files?: Array<{ filename: string; sha: string; status: string }>;
+      }>(
+        `${repositoryPath}/compare/${encodeURIComponent(
+          input.baseSha,
+        )}...${encodeURIComponent(existingRef.object.sha)}`,
+        { token },
+      );
+      const expected = new Map(
+        input.files.map((file) => [normalizeRepositoryPath(file.path), file]),
+      );
+      const changed = comparison?.files ?? [];
+      if (
+        changed.length !== expected.size ||
+        changed.some((file) => !expected.has(normalizeRepositoryPath(file.filename)))
+      ) {
+        throw new GitHubIntegrationError(
+          "existing_branch_file_set_mismatch",
+          "branch_conflict",
+          "The existing migration branch changes files outside the approved patch.",
+        );
+      }
+      const tree = await githubRequest<{
+        tree: Array<{ path: string; mode: string; type: string }>;
+      }>(
+        `${repositoryPath}/git/trees/${encodeURIComponent(
+          existingCommit.tree.sha,
+        )}?recursive=1`,
+        { token },
+      );
+      for (const changedFile of changed) {
+        const path = normalizeRepositoryPath(changedFile.filename);
+        const approved = expected.get(path);
+        const treeEntry = tree?.tree.find(
+          (entry) => normalizeRepositoryPath(entry.path) === path,
+        );
+        const blob = await githubRequest<{
+          content: string;
+          encoding: string;
+        }>(`${repositoryPath}/git/blobs/${encodeURIComponent(changedFile.sha)}`, {
+          token,
+        });
+        const actualContent =
+          blob?.encoding === "base64"
+            ? Buffer.from(blob.content.replace(/\s+/g, ""), "base64").toString(
+                "utf8",
+              )
+            : null;
+        if (
+          !approved ||
+          changedFile.status === "removed" ||
+          treeEntry?.mode !== "100644" ||
+          treeEntry.type !== "blob" ||
+          actualContent !== approved.newContent
+        ) {
+          throw new GitHubIntegrationError(
+            "existing_branch_content_mismatch",
+            "branch_conflict",
+            "The existing migration branch does not match the approved patch.",
+          );
+        }
+      }
       const pullRequests = await githubRequest<
         Array<{ number: number; html_url: string; head: { sha: string } }>
       >(
@@ -588,9 +689,14 @@ export class GitHubAppGateway implements GitHubGateway {
         { token },
       );
       const existingPullRequest = pullRequests?.[0];
-      if (!existingPullRequest) {
-        throw new Error(
-          "The migration branch already exists without a matching pull request.",
+      if (
+        !existingPullRequest ||
+        existingPullRequest.head.sha !== existingRef.object.sha
+      ) {
+        throw new GitHubIntegrationError(
+          "existing_branch_pr_mismatch",
+          "branch_conflict",
+          "The migration branch already exists without the matching approved pull request.",
         );
       }
       return {

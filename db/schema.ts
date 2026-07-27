@@ -565,6 +565,8 @@ export const migrationRuns = sqliteTable(
     mergeCommitSha: text("merge_commit_sha"),
     verificationRunId: text("verification_run_id"),
     costMicroUsd: integer("cost_micro_usd").notNull().default(0),
+    retryCount: integer("retry_count").notNull().default(0),
+    retryOfRunId: text("retry_of_run_id"),
     createdAt: text("created_at").notNull().default(currentTimestamp),
     startedAt: text("started_at"),
     completedAt: text("completed_at"),
@@ -582,6 +584,36 @@ export const migrationRuns = sqliteTable(
       table.updatedAt,
     ),
     uniqueIndex("migration_runs_trigger_run_uidx").on(table.triggerRunId),
+    uniqueIndex("migration_runs_retry_source_uidx").on(table.retryOfRunId),
+  ],
+);
+
+/**
+ * Durable idempotency boundary for signed workflow callbacks. Only a hash of
+ * the validated result and the source-free control-plane response are stored.
+ */
+export const workflowResultReceipts = sqliteTable(
+  "workflow_result_receipts",
+  {
+    runId: text("run_id")
+      .primaryKey()
+      .references(() => migrationRuns.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"assessment" | "patch">().notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    status: text("status").$type<"processing" | "completed">().notNull(),
+    response: text("response", { mode: "json" }).$type<JsonObject | null>(),
+    claimedAt: text("claimed_at").notNull(),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    index("workflow_result_receipts_org_status_idx").on(
+      table.organizationId,
+      table.status,
+      table.claimedAt,
+    ),
   ],
 );
 
@@ -709,6 +741,39 @@ export const validationResults = sqliteTable(
       table.organizationId,
       table.runId,
       table.category,
+    ),
+  ],
+);
+
+export const patchReviewFiles = sqliteTable(
+  "patch_review_files",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    runId: text("run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "cascade" }),
+    patchId: text("patch_id")
+      .notNull()
+      .references(() => patches.id, { onDelete: "cascade" }),
+    artifactId: text("artifact_id")
+      .notNull()
+      .references(() => artifacts.id, { onDelete: "restrict" }),
+    path: text("path").notNull(),
+    additions: integer("additions").notNull(),
+    deletions: integer("deletions").notNull(),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    uniqueIndex("patch_review_files_patch_path_uidx").on(
+      table.patchId,
+      table.path,
+    ),
+    index("patch_review_files_org_run_idx").on(
+      table.organizationId,
+      table.runId,
     ),
   ],
 );
@@ -870,5 +935,110 @@ export const supportAccessGrants = sqliteTable(
       table.runId,
       table.expiresAt,
     ),
+  ],
+);
+
+export const supportAccessRequests = sqliteTable(
+  "support_access_requests",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    runId: text("run_id")
+      .notNull()
+      .references(() => migrationRuns.id, { onDelete: "cascade" }),
+    requestedByMembershipId: text("requested_by_membership_id")
+      .notNull()
+      .references(() => memberships.id, { onDelete: "restrict" }),
+    reason: text("reason").notNull(),
+    requestedDurationMinutes: integer("requested_duration_minutes").notNull(),
+    status: text("status")
+      .$type<"pending" | "approved" | "denied" | "cancelled" | "expired">()
+      .notNull()
+      .default("pending"),
+    resolvedByMembershipId: text("resolved_by_membership_id").references(
+      () => memberships.id,
+      { onDelete: "restrict" },
+    ),
+    grantId: text("grant_id").references(() => supportAccessGrants.id, {
+      onDelete: "set null",
+    }),
+    resolvedAt: text("resolved_at"),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+    updatedAt: text("updated_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    index("support_access_requests_org_status_idx").on(
+      table.organizationId,
+      table.status,
+      table.createdAt,
+    ),
+    index("support_access_requests_requester_status_idx").on(
+      table.requestedByMembershipId,
+      table.status,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const operationalAlerts = sqliteTable(
+  "operational_alerts",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").references(() => organizations.id, {
+      onDelete: "cascade",
+    }),
+    runId: text("run_id").references(() => migrationRuns.id, {
+      onDelete: "cascade",
+    }),
+    severity: text("severity")
+      .$type<"warning" | "critical">()
+      .notNull(),
+    code: text("code").notNull(),
+    status: text("status")
+      .$type<"open" | "acknowledged" | "resolved">()
+      .notNull()
+      .default("open"),
+    occurrenceCount: integer("occurrence_count").notNull().default(1),
+    firstOccurredAt: text("first_occurred_at").notNull(),
+    lastOccurredAt: text("last_occurred_at").notNull(),
+    acknowledgedByMembershipId: text(
+      "acknowledged_by_membership_id",
+    ).references(() => memberships.id, { onDelete: "restrict" }),
+    acknowledgedAt: text("acknowledged_at"),
+    resolvedAt: text("resolved_at"),
+    createdAt: text("created_at").notNull().default(currentTimestamp),
+    updatedAt: text("updated_at").notNull().default(currentTimestamp),
+  },
+  (table) => [
+    index("operational_alerts_status_severity_idx").on(
+      table.status,
+      table.severity,
+      table.lastOccurredAt,
+    ),
+    index("operational_alerts_org_run_idx").on(
+      table.organizationId,
+      table.runId,
+    ),
+  ],
+);
+
+export const rateLimitBuckets = sqliteTable(
+  "rate_limit_buckets",
+  {
+    scopeHash: text("scope_hash").notNull(),
+    operation: text("operation").notNull(),
+    windowStartedAt: text("window_started_at").notNull(),
+    requestCount: integer("request_count").notNull().default(1),
+    expiresAt: text("expires_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("rate_limit_buckets_scope_operation_window_uidx").on(
+      table.scopeHash,
+      table.operation,
+      table.windowStartedAt,
+    ),
+    index("rate_limit_buckets_expires_idx").on(table.expiresAt),
   ],
 );

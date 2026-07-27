@@ -9,6 +9,7 @@ import {
   wantsHtml,
 } from "@/lib/http/responses";
 import { assertSameOrigin } from "@/lib/security/requests";
+import { enforceRateLimit } from "@/lib/security/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -30,6 +31,12 @@ export async function POST(request: Request): Promise<Response> {
     if (!context) {
       throw new DomainError("NOT_FOUND", "No active organization was found.");
     }
+    await enforceRateLimit({
+      subject: context.tenant.membershipId,
+      operation: "assessment.request",
+      limit: 10,
+      windowSeconds: 600,
+    });
     const result = await requestAssessment({
       tenant: context.tenant,
       invitationId: String(body.invitationId ?? ""),

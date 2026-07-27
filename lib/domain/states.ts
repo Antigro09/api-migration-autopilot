@@ -85,6 +85,7 @@ export const ARTIFACT_KINDS = [
   "repository_archive",
   "affected_snippets",
   "patch",
+  "patch_file",
   "validation_log",
   "run_manifest",
 ] as const;

@@ -152,21 +152,60 @@ Resource/output/time limits and kill-in-`finally` apply throughout.
 
 ## Persistence
 
-The D1 schema has 23 tables:
+The D1 schema has 28 tables:
 
 - organizations, memberships, provider verification challenges
 - API products, campaigns, migration specs, source artifacts
 - customer invitations, campaign participants
 - GitHub installations, repositories, repository migrations
-- consents, migration runs
-- artifacts, findings, patches, validation results
-- audit events, webhook deliveries, deletion jobs, support grants
+- consents, migration runs, workflow-result receipts
+- artifacts, findings, patches, per-file patch review artifacts, validation
+  results
+- audit events, webhook deliveries, deletion jobs
+- support requests and exact-run support grants
+- operational alerts and opaque rate-limit buckets
 
 Runs remain bound to their original spec revision. Audit events are canonical
 JSON with a SHA-256 predecessor chain. Approval and publication each persist a
 validated manifest revision in D1 and as an encrypted long-retention artifact;
 the publication revision contains the original approver, draft PR identity,
 and latest audit root.
+
+Each signed assessment or patch callback first claims a per-run receipt using a
+canonical result fingerprint. One delivery performs the side effects, an exact
+completed replay returns the persisted source-free response, a concurrent
+delivery is asked to retry, and a different result for the same run is refused.
+
+Patch review intentionally stores both the immutable aggregate patch and one
+encrypted artifact per changed file. Initial page queries list only per-file
+metadata. A customer-authenticated route proves organization, run, path, and
+artifact lifecycle before decrypting exactly one file. Approval and publication
+continue to re-hash the aggregate record, so lazy presentation cannot weaken
+the approval boundary.
+
+## Operations and observability
+
+Internal operations uses opaque organization/run identifiers and metadata-only
+queries. It can verify an audit chain, create a new immutable retry run after
+live GitHub/base-commit checks, requeue a failed deletion, and resolve alerts;
+it cannot edit hashes, base commits, approvals, or publication state.
+
+Support personnel have no source access by default. An internal operator
+requests access to one run for a stated purpose; a customer admin or approver
+may grant at most 24 hours. Every artifact read revalidates the exact active
+grant and records actor, object, purpose, and time.
+
+All telemetry passes through a key and value allowlist before OpenTelemetry,
+Sentry, or PostHog delivery. Organization, run, and correlation identities are
+one-way salted hashes. Source, snippets, paths, repository identity, findings,
+diffs, logs, credentials, headers, signed URLs, emails, and unknown fields are
+rejected. Provider credentials are optional and telemetry delivery failure
+cannot fail a product command.
+
+Dynamic pages and APIs are private/no-store and carry content, framing,
+referrer, permissions, and transport headers. Expensive browser commands use
+persisted fixed-window limits keyed by a one-way subject digest; expired
+buckets are removed by the retention sweep.
 
 ## Failure semantics
 

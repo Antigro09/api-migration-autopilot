@@ -205,10 +205,6 @@ function Topbar({
           <span aria-hidden="true" />
           Invite-only alpha
         </span>
-        <button className="icon-button" type="button" aria-label="Open notifications">
-          <span aria-hidden="true">◔</span>
-          <span className="notification-dot" />
-        </button>
         <span className="avatar-top" aria-label="Signed-in workspace member">
           {actor.displayName.slice(0, 1).toUpperCase()}
         </span>
@@ -253,7 +249,7 @@ export function ProductShell({
       />
       <div className="app-column">
         <Topbar surface={surface} view={view} actor={actor} />
-        <main className="main-content">
+        <main className="main-content" id="product-content" tabIndex={-1}>
           {flash ? (
             <div
               className={`notice ${
@@ -277,8 +273,8 @@ export function ProductShell({
           <ViewRenderer
             surface={surface}
             view={view}
-          providerData={providerData}
-          operationsData={operationsData}
+            providerData={providerData}
+            operationsData={operationsData}
             customerData={customerData}
             patchReview={patchReview}
             consentDisclosure={consentDisclosure}

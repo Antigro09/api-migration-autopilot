@@ -44,34 +44,6 @@ function review(overrides?: Partial<PatchReviewData>): PatchReviewData {
       },
     ],
     selectedPath: "src/billing.ts",
-    selectedDiff: {
-      path: "src/billing.ts",
-      additions: 1,
-      deletions: 1,
-      truncated: false,
-      hunks: [
-        {
-          originalStart: 1,
-          originalCount: 1,
-          newStart: 1,
-          newCount: 1,
-          lines: [
-            {
-              kind: "removed",
-              originalLine: 1,
-              newLine: null,
-              text: "const stripe = Stripe(key);",
-            },
-            {
-              kind: "added",
-              originalLine: null,
-              newLine: 1,
-              text: "const stripe = new Stripe(key);",
-            },
-          ],
-        },
-      ],
-    },
     additions: 1,
     deletions: 1,
     unresolvedFindingCount: 2,
@@ -110,11 +82,12 @@ function render(
   );
 }
 
-test("patch review renders the real diff, exact hash, and approval intent", () => {
+test("patch review renders metadata only, exact hash, and approval intent", () => {
   const markup = render("patch", review());
-  assert.match(markup, /const stripe = new Stripe\(key\);/);
-  assert.match(markup, /diff-line-added/);
-  assert.match(markup, /diff-line-removed/);
+  assert.doesNotMatch(markup, /const stripe/);
+  assert.match(markup, /Loading the selected encrypted file/);
+  assert.match(markup, /src\/billing\.ts/);
+  assert.match(markup, /Deterministic codemod/);
   assert.match(markup, new RegExp(PATCH_HASH));
   assert.match(markup, /name="approvalIntent" value="open-draft-pr"/);
   assert.match(markup, /Approve exact hash/);

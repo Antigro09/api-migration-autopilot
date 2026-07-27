@@ -63,6 +63,8 @@ Controls:
 - Offline validation and explicit registry-only dependency preparation.
 - Send no credentials or direct tools to the model.
 - Redact tokens, source, filenames, diffs, logs, and signed URLs from telemetry.
+- Reject unknown telemetry keys and one-way hash the only permitted
+  organization, run, and correlation identifiers before any provider call.
 
 ### Prompt injection
 
@@ -119,6 +121,35 @@ Controls:
 - Provider queries expose coarse lifecycle state only.
 - Findings and artifacts are organization-scoped customer records.
 - Do not put repository identifiers in provider-facing audit payloads.
+
+### Support-access escalation
+
+Risk: support personnel obtain broad or indefinite access to customer source.
+
+Controls:
+
+- No default support access and no bulk repository browsing.
+- Internal operators request one exact run with a bounded purpose and duration.
+- Only a customer admin or approver may grant access, for at most 24 hours.
+- Grant, denial, revocation, expiry, and every artifact read are audited.
+- Each read rechecks tenant, run, artifact lifecycle, membership, and grant
+  expiry; revoked or expired access fails closed immediately.
+
+### Browser and request abuse
+
+Risk: cross-site commands, framing, cached private data, or repeated expensive
+operations cause unauthorized changes or resource exhaustion.
+
+Controls:
+
+- Every browser mutation requires an exact same-origin header.
+- Dynamic responses are private/no-store, deny framing and content sniffing,
+  restrict browser capabilities and resource origins, and send HSTS on HTTPS.
+- Provider artifact bodies have declared and streaming byte limits.
+- Assessment, patch, artifact, support, and recovery operations have persisted
+  fixed-window limits keyed by one-way actor/membership digests.
+- Rate-limit rows contain no email or repository identity and expire
+  automatically.
 
 ### Retention failure
 

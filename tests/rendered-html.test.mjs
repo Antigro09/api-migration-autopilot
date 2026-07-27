@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import test from "node:test";
 
 const buildRoot = new URL("../dist/", import.meta.url);
@@ -31,8 +31,17 @@ test("production bundle exposes the full patch lifecycle as signed or authentica
   for (const route of [
     "/api/consents",
     "/api/patches",
+    "/api/patches/:runId/files",
     "/api/patches/approve",
     "/api/patches/publish",
+    "/api/operations/alerts",
+    "/api/operations/audit/verify",
+    "/api/operations/deletions/retry",
+    "/api/operations/runs/retry",
+    "/api/operations/support/requests",
+    "/api/operations/support/artifacts/:artifactId",
+    "/api/support/requests/resolve",
+    "/api/support/grants/revoke",
     "/api/runs/:id",
     "/api/internal/runs/:id/patch-packet",
     "/api/internal/runs/:id/patch-result",
@@ -56,4 +65,41 @@ test("production bundle keeps the publication and consent invariants in shipped 
   assert.match(server, /never merged\s*\n?\s*automatically|never merged/i);
   // No auto-merge affordance may be shipped.
   assert.doesNotMatch(server, /"PUT",\s*path:\s*`?[^`"]*\/pulls\/[^`"]*\/merge/);
+});
+
+test("production responses ship private-cache and browser security boundaries", async () => {
+  const server = await readFile(new URL("server/index.js", buildRoot), "utf8");
+  for (const invariant of [
+    "private, no-store, max-age=0",
+    "frame-ancestors 'none'",
+    "X-Content-Type-Options",
+    "Strict-Transport-Security",
+    "Permissions-Policy",
+    "RATE_LIMITED",
+  ]) {
+    assert.match(server, new RegExp(invariant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});
+
+test("Monaco is self-hosted and remains outside the initial client payload", async () => {
+  const assetsRoot = new URL("client/assets/", buildRoot);
+  const names = await readdir(assetsRoot);
+  const lazyName = names.find((name) => name.startsWith("lazy-patch-diff-"));
+  const editorName = names.find((name) => name.startsWith("editor.api-"));
+  const entryName = names.find((name) => name.startsWith("index-") && name.endsWith(".js"));
+  assert.ok(lazyName, "expected the patch review client chunk");
+  assert.ok(editorName, "expected a self-hosted Monaco editor chunk");
+  assert.ok(entryName, "expected the initial client entry chunk");
+
+  const [lazy, entry, lazyStats, editorStats] = await Promise.all([
+    readFile(new URL(lazyName, assetsRoot), "utf8"),
+    readFile(new URL(entryName, assetsRoot), "utf8"),
+    stat(new URL(lazyName, assetsRoot)),
+    stat(new URL(editorName, assetsRoot)),
+  ]);
+  assert.match(lazy, /import\(`\.\/editor\.api-/);
+  assert.doesNotMatch(entry, /editor\.api-/);
+  assert.ok(lazyStats.size < 50_000, "patch selector must stay lightweight");
+  assert.ok(editorStats.size < 3_000_000, "lazy editor chunk exceeded its budget");
+  assert.doesNotMatch(lazy, /cdn\.jsdelivr|unpkg\.com|cdnjs\.cloudflare/);
 });

@@ -5,7 +5,8 @@ export type IntegrationName =
   | "e2b"
   | "trigger"
   | "resend"
-  | "workos";
+  | "workos"
+  | "telemetry";
 
 export type IntegrationReadiness = Record<
   IntegrationName,
@@ -22,6 +23,10 @@ function present(name: string): boolean {
 
 function allPresent(...names: string[]): boolean {
   return names.every(present);
+}
+
+function anyPresent(...names: string[]): boolean {
+  return names.some(present);
 }
 
 export function integrationReadiness(): IntegrationReadiness {
@@ -85,6 +90,18 @@ export function integrationReadiness(): IntegrationReadiness {
       ),
       purpose: "Optional organization directory and role synchronization.",
       requiredFor: "enterprise directory sync",
+    },
+    telemetry: {
+      configured:
+        present("TELEMETRY_HASH_SALT") &&
+        anyPresent(
+          "OTEL_EXPORTER_OTLP_ENDPOINT",
+          "SENTRY_DSN",
+          "POSTHOG_API_KEY",
+        ),
+      purpose:
+        "Export allowlisted, one-way-pseudonymized operational metadata only.",
+      requiredFor: "production observability and alert delivery",
     },
   };
 }

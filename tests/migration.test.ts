@@ -5,6 +5,7 @@ import { assessStripeV20ToV22 } from "../lib/migration/analyzer";
 import type { RepositoryFile } from "../lib/migration/contracts";
 import {
   normalizeRepositoryPath,
+  validatePatchEnvelope,
   validateProposedPatch,
 } from "../lib/migration/patch-security";
 import {
@@ -73,6 +74,10 @@ test("Stripe reference analyzer resolves the lockfile and produces real codemod 
 
 test("patch validation blocks traversal and workflow changes", async () => {
   assert.throws(() => normalizeRepositoryPath("../secrets.txt"), /traversal/);
+  assert.throws(
+    () => normalizeRepositoryPath("%2e%2e%2fsecrets.txt"),
+    /Encoded separators/,
+  );
   const result = await validateProposedPatch({
     baseSha: "a".repeat(40),
     expectedBaseSha: "a".repeat(40),
@@ -92,6 +97,35 @@ test("patch validation blocks traversal and workflow changes", async () => {
   });
   assert.equal(result.valid, false);
   assert.ok(result.issues.some((issue) => issue.code === "workflow-file"));
+});
+
+test("patch envelope independently refuses binary, duplicate, oversized, excessive, and stale-base edits", async () => {
+  const edit = {
+    path: "src/client.ts",
+    originalContent: "oldClient();\n",
+    newContent: `new Client();\0${"x".repeat(128)}`,
+    ruleIds: ["provider.constructor"],
+    rationale: ["Use the supported constructor."],
+  };
+  const result = await validatePatchEnvelope({
+    baseSha: "a".repeat(40),
+    expectedBaseSha: "b".repeat(40),
+    files: [edit, edit],
+    allowedPaths: [edit.path],
+    maxFiles: 1,
+    maxPatchBytes: 32,
+  });
+  assert.equal(result.valid, false);
+  const codes = new Set(result.issues.map((issue) => issue.code));
+  for (const code of [
+    "base-sha-mismatch",
+    "too-many-files",
+    "binary-content",
+    "duplicate-path",
+    "patch-too-large",
+  ] as const) {
+    assert.ok(codes.has(code), `expected ${code}`);
+  }
 });
 
 test("provider templates apply only to the exact detected candidate range", async () => {

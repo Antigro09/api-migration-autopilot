@@ -110,13 +110,53 @@ function assertMinimizedInput(input: {
   if (input.evidence.length === 0 || input.evidence.length > 40) {
     throw new Error("Model requests require bounded approved evidence.");
   }
-  const allowed = new Set(input.allowedPaths);
+  const allowed = new Set(
+    input.allowedPaths.map((path) => {
+      const normalized = normalizeRepositoryPath(path);
+      if (normalized !== path || isWorkflowPath(normalized)) {
+        throw new Error("Model allowed paths must be normalized non-workflow files.");
+      }
+      return normalized;
+    }),
+  );
   for (const candidate of input.candidates) {
-    if (!allowed.has(candidate.path)) {
+    const normalized = normalizeRepositoryPath(candidate.path);
+    if (
+      normalized !== candidate.path ||
+      isWorkflowPath(normalized) ||
+      !allowed.has(normalized)
+    ) {
       throw new Error("Every candidate path must be explicitly allowed.");
     }
-    if (candidate.snippet.length > 8_000) {
+    if (
+      !candidate.id ||
+      candidate.id.length > 200 ||
+      !candidate.ruleId ||
+      candidate.ruleId.length > 200 ||
+      !Number.isInteger(candidate.start) ||
+      !Number.isInteger(candidate.end) ||
+      candidate.start < 0 ||
+      candidate.end < candidate.start ||
+      candidate.localConventions.length > 50 ||
+      candidate.localConventions.some((value) => value.length > 500)
+    ) {
+      throw new Error("Model candidate metadata is invalid.");
+    }
+    if (candidate.snippet.length === 0 || candidate.snippet.length > 8_000) {
       throw new Error("Candidate snippet exceeds the minimization limit.");
+    }
+  }
+  for (const evidence of input.evidence) {
+    if (
+      !evidence.id ||
+      evidence.id.length > 200 ||
+      !evidence.title ||
+      evidence.title.length > 500 ||
+      evidence.citation.length > 2_000 ||
+      evidence.text.length === 0 ||
+      evidence.text.length > 20_000
+    ) {
+      throw new Error("Approved model evidence is not sufficiently bounded.");
     }
   }
   const totalCharacters =
@@ -181,11 +221,7 @@ async function createStructuredResponse<T>(input: {
     | ResponsePayload
     | null;
   if (!response.ok || !payload) {
-    const detail =
-      typeof payload?.error?.message === "string"
-        ? payload.error.message
-        : `OpenAI returned HTTP ${response.status}.`;
-    throw new Error(`Model request failed: ${detail}`);
+    throw new Error(`Model request failed with HTTP ${response.status}.`);
   }
   const parsed = JSON.parse(textOutput(payload)) as T;
   if (typeof payload.id !== "string" || typeof payload.model !== "string") {

@@ -1,7 +1,10 @@
 import { createHmac } from "node:crypto";
 import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, relative } from "node:path";
 import test from "node:test";
 import { parseMigrationAssessment } from "../lib/migration/assessment-validation";
+import { applySecurityHeaders } from "../lib/security/headers";
 import { verifyGitHubWebhookSignature } from "../lib/security/webhooks";
 
 test("GitHub webhook verification authenticates the exact raw body", () => {
@@ -64,4 +67,69 @@ test("assessment boundary validates paths and discards repository excerpts", () 
       }),
     /normalized relative repository path/,
   );
+});
+
+test("dynamic responses are private and carry the browser security boundary", () => {
+  const headers = new Headers();
+  applySecurityHeaders(headers, "https://autopilot.test/customer");
+  assert.equal(headers.get("cache-control"), "private, no-store, max-age=0");
+  assert.equal(headers.get("x-frame-options"), "DENY");
+  assert.equal(headers.get("x-content-type-options"), "nosniff");
+  assert.equal(headers.get("referrer-policy"), "no-referrer");
+  assert.equal(headers.get("strict-transport-security"), "max-age=31536000");
+  assert.match(headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  assert.match(headers.get("content-security-policy") ?? "", /worker-src 'self' blob:/);
+  assert.doesNotMatch(headers.get("permissions-policy") ?? "", /camera=\*/);
+});
+
+function routeFiles(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(root, entry.name);
+    return entry.isDirectory()
+      ? routeFiles(path)
+      : entry.name === "route.ts"
+        ? [path]
+        : [];
+  });
+}
+
+test("every shipped API route declares the correct browser, workflow, or webhook trust boundary", () => {
+  const root = join(process.cwd(), "app", "api");
+  for (const path of routeFiles(root)) {
+    const source = readFileSync(path, "utf8");
+    const route = relative(root, path).replaceAll("\\", "/");
+    const hasPost = /export async function POST/.test(source);
+    const hasGet = /export async function GET/.test(source);
+    if (route.startsWith("webhooks/github/")) {
+      assert.match(source, /handleGitHubWebhook/, `${route}: webhook verifier`);
+      continue;
+    }
+    if (route.startsWith("internal/")) {
+      assert.match(
+        source,
+        /assertWorkflowAuthorization\(request\)/,
+        `${route}: signed workflow authorization`,
+      );
+      continue;
+    }
+    if (hasPost) {
+      assert.match(
+        source,
+        /assertSameOrigin\(request\)/,
+        `${route}: same-origin mutation check`,
+      );
+      assert.match(
+        source,
+        /requireAuthenticatedActor/,
+        `${route}: authenticated actor`,
+      );
+    }
+    if (hasGet && route !== "health/route.ts") {
+      assert.match(
+        source,
+        /requireAuthenticatedActor/,
+        `${route}: authenticated read`,
+      );
+    }
+  }
 });

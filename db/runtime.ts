@@ -3,6 +3,9 @@ import baselineSql from "../drizzle/0000_sleepy_landau.sql?raw";
 import patchWorkflowSql from "../drizzle/0001_patch_workflow.sql?raw";
 import providerAuthoringSql from "../drizzle/0002_far_chameleon.sql?raw";
 import providerReviewSql from "../drizzle/0003_green_ironclad.sql?raw";
+import productionControlsSql from "../drizzle/0004_red_enchantress.sql?raw";
+import abuseControlsSql from "../drizzle/0005_normal_sentry.sql?raw";
+import workflowResultReceiptsSql from "../drizzle/0006_brainy_mac_gargan.sql?raw";
 
 const STATEMENT_BREAKPOINT = "--> statement-breakpoint";
 
@@ -16,6 +19,9 @@ const MIGRATIONS: ReadonlyArray<{ version: number; sql: string }> = [
   { version: 2, sql: patchWorkflowSql },
   { version: 3, sql: providerAuthoringSql },
   { version: 4, sql: providerReviewSql },
+  { version: 5, sql: productionControlsSql },
+  { version: 6, sql: abuseControlsSql },
+  { version: 7, sql: workflowResultReceiptsSql },
 ];
 
 let initialization: Promise<void> | undefined;

@@ -10,6 +10,16 @@ import {
   type AppView,
 } from "./ui";
 
+function formatDuration(durationMs: number): string {
+  const seconds = Math.round(durationMs / 1_000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function formatCost(microUsd: number): string {
+  return `$${(microUsd / 1_000_000).toFixed(4)}`;
+}
+
 function OperationsOverview({
   data,
   integrations,
@@ -43,16 +53,16 @@ function OperationsOverview({
           detail="Pending, running, or failed jobs"
         />
         <MetricCard
-          label="Unverified providers"
-          value={String(data?.unverifiedProviders ?? 0)}
-          detail="Domain or branding approval pending"
+          label="Recent run cost"
+          value={formatCost(data?.totalCostMicroUsd ?? 0)}
+          detail={`${Math.round(data?.totalSandboxSeconds ?? 0)} sandbox seconds`}
         />
       </section>
       <div className="content-grid content-grid-main">
         <section className="panel">
           <SectionHeading
             title="System readiness"
-            description="Connection checks will reflect the runtime configuration once services are wired."
+            description="Every status below is derived from runtime configuration."
           />
           <div className="readiness-grid">
             {[
@@ -84,7 +94,12 @@ function OperationsOverview({
                   ? "Configured"
                   : "Not configured",
               ],
-              ["Telemetry", "Not configured"],
+              [
+                "Telemetry",
+                integrations.telemetry.configured
+                  ? "Configured"
+                  : "Not configured",
+              ],
             ].map(([name, status]) => (
               <div className="readiness-item" key={name}>
                 <span className="readiness-dot" />
@@ -98,7 +113,7 @@ function OperationsOverview({
           <div className="panel-kicker">Operator boundary</div>
           <h2>Redacted by default</h2>
           <p>
-            Diagnostics contain job identifiers, stage status, duration, and
+            Diagnostics contain opaque identifiers, stage status, duration, and
             cost—not code, paths, diffs, logs, tokens, or signed URLs.
           </p>
           <StatusPill tone="success">Source access disabled</StatusPill>
@@ -166,11 +181,79 @@ function OperationsOverview({
           </div>
         )}
       </section>
+      {data && data.alerts.length > 0 ? (
+        <section className="panel">
+          <SectionHeading
+            title="Operational alerts"
+            description="Persisted, redacted signals. Alerts contain codes and opaque identifiers only."
+          />
+          <div className="operational-alert-records">
+            {data.alerts.map((alert) => (
+              <article className="operational-alert-record" key={alert.id}>
+                <StatusPill
+                  tone={alert.severity === "critical" ? "danger" : "warning"}
+                >
+                  {alert.severity}
+                </StatusPill>
+                <div>
+                  <strong>{alert.code}</strong>
+                  <small>
+                    {alert.occurrenceCount} occurrence
+                    {alert.occurrenceCount === 1 ? "" : "s"} ·{" "}
+                    {alert.status}
+                  </small>
+                </div>
+                <time dateTime={alert.lastOccurredAt}>
+                  {new Date(alert.lastOccurredAt).toLocaleString("en-US")}
+                </time>
+                <div className="support-decision-actions">
+                  {alert.status === "open" ? (
+                    <form action="/api/operations/alerts" method="post">
+                      <input
+                        name="organizationId"
+                        type="hidden"
+                        value={workspaceId}
+                      />
+                      <input name="alertId" type="hidden" value={alert.id} />
+                      <input
+                        name="action"
+                        type="hidden"
+                        value="acknowledge"
+                      />
+                      <button
+                        className="button button-secondary button-small"
+                        type="submit"
+                      >
+                        Acknowledge
+                      </button>
+                    </form>
+                  ) : null}
+                  <form action="/api/operations/alerts" method="post">
+                    <input
+                      name="organizationId"
+                      type="hidden"
+                      value={workspaceId}
+                    />
+                    <input name="alertId" type="hidden" value={alert.id} />
+                    <input name="action" type="hidden" value="resolve" />
+                    <button
+                      className="button button-secondary button-small"
+                      type="submit"
+                    >
+                      Resolve
+                    </button>
+                  </form>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
       <section className="panel">
         <SectionHeading title="Attention queue" />
         <EmptyState
           compact
-          symbol="✓"
+          symbol={data?.attentionRuns ? "!" : "✓"}
           title={
             data?.attentionRuns
               ? `${data.attentionRuns} failed run${
@@ -180,7 +263,7 @@ function OperationsOverview({
           }
           description={
             data?.attentionRuns
-              ? "Open the Runs view for persisted redacted failure metadata."
+              ? "Open Runs for persisted failure metadata and bounded retry controls."
               : "No persisted failed run currently requires review."
           }
         />
@@ -189,27 +272,38 @@ function OperationsOverview({
   );
 }
 
-function Runs({ data }: { data?: OperationsOverviewData }) {
+function Runs({
+  data,
+  workspaceId,
+}: {
+  data?: OperationsOverviewData;
+  workspaceId: string;
+}) {
   return (
     <>
       <PageHeading
         eyebrow="Internal operations"
         title="Workflow runs"
-        description="Inspect redacted stage health, perform safe idempotent retries, and verify cleanup without viewing customer source."
+        description="Inspect redacted health, perform bounded idempotent retries, and verify cleanup without viewing customer source."
       />
       <div className="notice notice-neutral">
-        <span className="notice-symbol" aria-hidden="true">i</span>
+        <span className="notice-symbol" aria-hidden="true">
+          i
+        </span>
         <div>
           <strong>Metadata-only operations view</strong>
-          <p>Customer source access requires a separate time-limited grant and is always audited.</p>
+          <p>
+            Customer source access requires a separate, customer-approved,
+            time-limited grant and every read is audited.
+          </p>
         </div>
-        <StatusPill tone="success">No active grants</StatusPill>
+        <StatusPill tone="success">Customer authorization required</StatusPill>
       </div>
       <section className="panel table-panel">
         <div className="table-toolbar">
           <div className="filter-control">
             <span aria-hidden="true">⌕</span>
-            <span>Search by run ID</span>
+            <span>Latest 50 persisted runs</span>
           </div>
           <div className="table-filter-pills">
             <span className="filter-pill filter-pill-active">All runs</span>
@@ -219,59 +313,283 @@ function Runs({ data }: { data?: OperationsOverviewData }) {
           </div>
         </div>
         <div className="runs-head">
-          <span>Run</span><span>Stage</span><span>Status</span><span>Duration</span><span>Cleanup</span>
+          <span>Run</span>
+          <span>Type</span>
+          <span>Status</span>
+          <span>Usage</span>
+          <span>Action</span>
         </div>
         {(data?.recentRuns.length ?? 0) === 0 ? (
-        <EmptyState
-          symbol="▶"
-          title="No workflow runs"
-          description="Assessment and patch workflows will appear only after a real task is persisted."
-        />
+          <EmptyState
+            symbol="▶"
+            title="No workflow runs"
+            description="Assessment and patch workflows appear only after a real task is persisted."
+          />
         ) : (
           <div className="operations-run-records">
-            {data?.recentRuns.map((run) => (
+            {data?.recentRuns.map((run) => {
+              const pendingRequest = data.supportAccess.requests.find(
+                (request) =>
+                  request.runId === run.id && request.status === "pending",
+              );
+              const authorizedArtifacts = data.supportAccess.artifacts.filter(
+                (artifact) => artifact.runId === run.id,
+              );
+              const hasActiveGrant =
+                data.supportAccess.activeRunIds.includes(run.id);
+              return (
               <article className="operations-run-record" key={run.id}>
-                <code>{run.id}</code>
-                <span>{run.kind}</span>
+                <div className="operations-run-identity">
+                  <code>{run.id}</code>
+                  <small>{run.organizationId}</small>
+                </div>
+                <span>
+                  {run.kind}
+                  {run.retryCount > 0 ? ` · retry ${run.retryCount}` : ""}
+                </span>
                 <StatusPill
                   tone={run.state === "failed" ? "danger" : "neutral"}
                 >
                   {run.state.replaceAll("_", " ")}
                 </StatusPill>
-                <span>{run.failureCategory ?? "—"}</span>
-                <time dateTime={run.updatedAt}>
-                  {new Date(run.updatedAt).toLocaleString("en-US")}
-                </time>
+                <div className="run-usage">
+                  <span>
+                    {formatDuration(run.durationMs)} ·{" "}
+                    {formatCost(run.costMicroUsd)}
+                  </span>
+                  <small>
+                    {run.sandboxSeconds}s sandbox
+                    {run.model ? ` · ${run.model}` : ""}
+                  </small>
+                  <small>
+                    {run.sourceArtifactsRemaining === 0
+                      ? "Source cleaned"
+                      : `${run.sourceArtifactsRemaining} source artifact${
+                          run.sourceArtifactsRemaining === 1 ? "" : "s"
+                        } retained`}
+                  </small>
+                </div>
+                <div className="operations-run-actions">
+                  {run.retryable ? (
+                    <form
+                      action="/api/operations/runs/retry"
+                      className="operations-action-form"
+                      method="post"
+                    >
+                      <input
+                        name="organizationId"
+                        type="hidden"
+                        value={workspaceId}
+                      />
+                      <input name="runId" type="hidden" value={run.id} />
+                      <input
+                        aria-label={`Reason for retrying ${run.id}`}
+                        minLength={8}
+                        maxLength={500}
+                        name="reason"
+                        placeholder="Infrastructure issue confirmed"
+                        required
+                      />
+                      <button
+                        className="button button-secondary button-small"
+                        type="submit"
+                      >
+                        Safe retry
+                      </button>
+                    </form>
+                  ) : (
+                  <div className="run-failure-detail">
+                    <span>{run.failureCategory ?? "No failure"}</span>
+                    <small>{run.failureCode ?? "—"}</small>
+                  </div>
+                  )}
+                  {hasActiveGrant ? (
+                    <StatusPill tone="warning">
+                      Customer grant active · {authorizedArtifacts.length} artifact
+                      {authorizedArtifacts.length === 1 ? "" : "s"}
+                    </StatusPill>
+                  ) : pendingRequest ? (
+                    <form
+                      action="/api/operations/support/requests"
+                      className="operations-action-form"
+                      method="post"
+                    >
+                      <input name="action" type="hidden" value="cancel" />
+                      <input
+                        name="organizationId"
+                        type="hidden"
+                        value={workspaceId}
+                      />
+                      <input
+                        name="requestId"
+                        type="hidden"
+                        value={pendingRequest.id}
+                      />
+                      <button
+                        className="button button-secondary button-small"
+                        type="submit"
+                      >
+                        Cancel access request
+                      </button>
+                    </form>
+                  ) : (
+                    <form
+                      action="/api/operations/support/requests"
+                      className="operations-action-form"
+                      method="post"
+                    >
+                      <input name="action" type="hidden" value="request" />
+                      <input
+                        name="organizationId"
+                        type="hidden"
+                        value={workspaceId}
+                      />
+                      <input name="runId" type="hidden" value={run.id} />
+                      <input
+                        aria-label={`Purpose for requesting support access to ${run.id}`}
+                        minLength={16}
+                        maxLength={500}
+                        name="reason"
+                        placeholder="Diagnose this customer-reported failure"
+                        required
+                      />
+                      <select
+                        aria-label={`Access duration for ${run.id}`}
+                        name="durationMinutes"
+                        defaultValue="60"
+                      >
+                        <option value="30">30 minutes</option>
+                        <option value="60">1 hour</option>
+                        <option value="240">4 hours</option>
+                        <option value="1440">24 hours</option>
+                      </select>
+                      <button
+                        className="button button-secondary button-small"
+                        type="submit"
+                      >
+                        Request customer access
+                      </button>
+                    </form>
+                  )}
+                </div>
               </article>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
+      {data && data.supportAccess.artifacts.length > 0 ? (
+        <section className="panel">
+          <SectionHeading
+            title="Customer-authorized artifacts"
+            description="Each download is limited to the exact granted run, expires automatically, is never cached, and creates a customer-visible audit event."
+          />
+          <div className="support-artifact-records">
+            {data.supportAccess.artifacts.map((artifact) => (
+              <article className="support-artifact-record" key={artifact.artifactId}>
+                <div>
+                  <code>{artifact.artifactId}</code>
+                  <small>
+                    {artifact.kind} · {artifact.sizeBytes.toLocaleString("en-US")} bytes
+                  </small>
+                </div>
+                <time dateTime={artifact.grantExpiresAt}>
+                  Grant expires{" "}
+                  {new Date(artifact.grantExpiresAt).toLocaleString("en-US")}
+                </time>
+                <a
+                  className="button button-secondary button-small"
+                  href={`/api/operations/support/artifacts/${encodeURIComponent(
+                    artifact.artifactId,
+                  )}?organization=${encodeURIComponent(workspaceId)}`}
+                >
+                  Download with audit
+                </a>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
       <div className="content-grid content-grid-main">
         <section className="panel">
-          <SectionHeading title="Deletion queue" description="Source cleanup has a hard 24-hour deadline, including interrupted workflows." />
-          {(data?.deletionJobs.length ?? 0) === 0 ? (
-          <EmptyState
-            compact
-            symbol="⌫"
-            title="Queue is empty"
-            description="There are no retained source artifacts scheduled for deletion."
+          <SectionHeading
+            title="Deletion queue"
+            description="Source cleanup has a hard 24-hour deadline, including interrupted workflows."
           />
+          {(data?.deletionJobs.length ?? 0) === 0 ? (
+            <EmptyState
+              compact
+              symbol="⌫"
+              title="Queue is empty"
+              description="There are no retained source artifacts scheduled for deletion."
+            />
           ) : (
             <div className="deletion-job-records">
               {data?.deletionJobs.map((job) => (
                 <article className="deletion-job-record" key={job.id}>
-                  <code>{job.id}</code>
+                  <div>
+                    <code>{job.id}</code>
+                    <small>{job.organizationId}</small>
+                  </div>
                   <StatusPill
-                    tone={job.status === "failed" ? "danger" : "warning"}
+                    tone={
+                      job.status === "failed" || job.deadlineBreached
+                        ? "danger"
+                        : "warning"
+                    }
                   >
-                    {job.status}
+                    {job.deadlineBreached ? "deadline breached" : job.status}
                   </StatusPill>
-                  <span>{job.reason}</span>
-                  <span>{job.attemptCount} attempts</span>
-                  <time dateTime={job.hardDeadlineAt}>
-                    {new Date(job.hardDeadlineAt).toLocaleString("en-US")}
-                  </time>
+                  <div>
+                    <span>{job.reason}</span>
+                    <small>
+                      {job.attemptCount} attempts
+                      {job.lastErrorCode ? ` · ${job.lastErrorCode}` : ""}
+                    </small>
+                  </div>
+                  <div>
+                    <small>Hard deadline</small>
+                    <time dateTime={job.hardDeadlineAt}>
+                      {new Date(job.hardDeadlineAt).toLocaleString("en-US")}
+                    </time>
+                  </div>
+                  {job.status === "failed" && job.attemptCount < 10 ? (
+                    <form
+                      action="/api/operations/deletions/retry"
+                      className="operations-action-form"
+                      method="post"
+                    >
+                      <input
+                        name="organizationId"
+                        type="hidden"
+                        value={workspaceId}
+                      />
+                      <input
+                        name="deletionJobId"
+                        type="hidden"
+                        value={job.id}
+                      />
+                      <input
+                        aria-label={`Reason for retrying deletion ${job.id}`}
+                        minLength={8}
+                        maxLength={500}
+                        name="reason"
+                        placeholder="Storage service recovered"
+                        required
+                      />
+                      <button
+                        className="button button-secondary button-small"
+                        type="submit"
+                      >
+                        Requeue deletion
+                      </button>
+                    </form>
+                  ) : (
+                    <small>
+                      Next attempt{" "}
+                      {new Date(job.nextAttemptAt).toLocaleString("en-US")}
+                    </small>
+                  )}
                 </article>
               ))}
             </div>
@@ -290,31 +608,69 @@ function Runs({ data }: { data?: OperationsOverviewData }) {
   );
 }
 
-function OperationsAudit({ data }: { data?: OperationsOverviewData }) {
+function OperationsAudit({
+  data,
+  workspaceId,
+}: {
+  data?: OperationsOverviewData;
+  workspaceId: string;
+}) {
   return (
     <>
       <PageHeading
         eyebrow="Internal operations"
         title="Operations audit"
-        description="Provider verification, retries, support grants, deletion actions, and policy changes."
+        description="Verify complete hash chains for provider verification, retries, support grants, deletion actions, and policy changes."
       />
       <section className="panel">
         {(data?.recentAuditEvents.length ?? 0) === 0 ? (
-        <EmptyState
-          symbol="◌"
-          title="No operations events"
-          description="The audit stream will start with the first persisted internal action."
-        />
+          <EmptyState
+            symbol="◌"
+            title="No operations events"
+            description="The audit stream starts with the first persisted internal action."
+          />
         ) : (
           <div className="audit-records">
             {data?.recentAuditEvents.map((event) => (
               <article className="audit-record" key={event.id}>
                 <code>{event.actorMembershipId ?? "system"}</code>
-                <strong>{event.action}</strong>
-                <span>{event.aggregateType}</span>
+                <div>
+                  <strong>{event.action}</strong>
+                  <small>
+                    {event.aggregateType} · sequence {event.sequence}
+                  </small>
+                </div>
                 <time dateTime={event.occurredAt}>
                   {new Date(event.occurredAt).toLocaleString("en-US")}
                 </time>
+                <form action="/api/operations/audit/verify" method="post">
+                  <input
+                    name="organizationId"
+                    type="hidden"
+                    value={workspaceId}
+                  />
+                  <input
+                    name="targetOrganizationId"
+                    type="hidden"
+                    value={event.organizationId}
+                  />
+                  <input
+                    name="aggregateType"
+                    type="hidden"
+                    value={event.aggregateType}
+                  />
+                  <input
+                    name="aggregateId"
+                    type="hidden"
+                    value={event.aggregateId}
+                  />
+                  <button
+                    className="button button-secondary button-small"
+                    type="submit"
+                  >
+                    Verify chain
+                  </button>
+                </form>
               </article>
             ))}
           </div>
@@ -335,8 +691,12 @@ export function OperationsView({
   integrations: IntegrationReadiness;
   workspaceId: string;
 }) {
-  if (view === "runs") return <Runs data={data} />;
-  if (view === "audit") return <OperationsAudit data={data} />;
+  if (view === "runs") {
+    return <Runs data={data} workspaceId={workspaceId} />;
+  }
+  if (view === "audit") {
+    return <OperationsAudit data={data} workspaceId={workspaceId} />;
+  }
   return (
     <OperationsOverview
       data={data}

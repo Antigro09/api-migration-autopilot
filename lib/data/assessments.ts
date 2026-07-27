@@ -11,8 +11,10 @@ import type { MigrationAssessment } from "@/lib/migration/contracts";
 import { normalizeRepositoryPath } from "@/lib/migration/patch-security";
 import { publicAppUrl } from "@/lib/platform/config";
 import { TriggerWorkflowEngine } from "@/lib/workflows/engine";
+import { recordOperationalAlert } from "./alerts";
 import { storeRunArtifact } from "./artifacts";
 import { appendAuditEvent } from "./control-plane";
+import { processWorkflowResult } from "./workflow-results";
 
 export type AssessmentWorkPacket = {
   runId: string;
@@ -388,6 +390,55 @@ export async function completeAssessment(input: {
   execution: AssessmentExecutionEvidence;
 }): Promise<void> {
   await ensureDatabaseSchema();
+  const database = getD1();
+  const run = await database
+    .prepare(
+      `SELECT organization_id AS organizationId
+       FROM migration_runs
+       WHERE id = ? AND kind IN ('assessment', 'verification')
+       LIMIT 1`,
+    )
+    .bind(input.runId)
+    .first<{ organizationId: string }>();
+  if (!run) {
+    throw new DomainError("NOT_FOUND", "The assessment run was not found.");
+  }
+  await processWorkflowResult({
+    runId: input.runId,
+    organizationId: run.organizationId,
+    kind: "assessment",
+    payload: {
+      assessment: input.assessment,
+      skipped: input.skipped,
+      execution: input.execution,
+    },
+    process: async () => {
+      await persistAssessmentResult(input);
+      return { completed: true };
+    },
+    recoverCompleted: async () => {
+      const completed = await database
+        .prepare(
+          `SELECT state
+           FROM migration_runs
+           WHERE id = ? AND organization_id = ?
+             AND state IN ('cleaned', 'verified')
+           LIMIT 1`,
+        )
+        .bind(input.runId, run.organizationId)
+        .first<{ state: string }>();
+      return completed ? { completed: true } : null;
+    },
+  });
+}
+
+async function persistAssessmentResult(input: {
+  runId: string;
+  assessment: MigrationAssessment;
+  skipped: Array<{ path: string; reason: string }>;
+  execution: AssessmentExecutionEvidence;
+}): Promise<void> {
+  await ensureDatabaseSchema();
   if (input.assessment.findings.length > 10_000) {
     throw new DomainError(
       "VALIDATION_FAILED",
@@ -639,13 +690,18 @@ export async function failAssessment(
   const run = await database
     .prepare(
       `SELECT organization_id AS organizationId,
-              repository_migration_id AS repositoryMigrationId
+              repository_migration_id AS repositoryMigrationId,
+              kind
        FROM migration_runs
        WHERE id = ? AND state IN ('queued', 'acquiring_source', 'analyzing')
        LIMIT 1`,
     )
     .bind(runId)
-    .first<{ organizationId: string; repositoryMigrationId: string }>();
+    .first<{
+      organizationId: string;
+      repositoryMigrationId: string;
+      kind: "assessment" | "verification";
+    }>();
   if (!run) return;
   await database.batch([
     database
@@ -664,13 +720,40 @@ export async function failAssessment(
       ),
     database
       .prepare(
-        `UPDATE repository_migrations
-         SET state = 'scanner_connected',
+       `UPDATE repository_migrations
+         SET state = ?,
              last_failure_category = 'infrastructure', updated_at = ?
          WHERE id = ? AND organization_id = ?`,
       )
-      .bind(now, run.repositoryMigrationId, run.organizationId),
+      .bind(
+        run.kind === "verification" ? "merged" : "scanner_connected",
+        now,
+        run.repositoryMigrationId,
+        run.organizationId,
+      ),
   ]);
+  await appendAuditEvent({
+    organizationId: run.organizationId,
+    aggregateType: "run",
+    aggregateId: runId,
+    action: run.kind === "verification" ? "verification.failed" : "assessment.failed",
+    payload: {
+      failureCode: failureCode.slice(0, 128),
+      category: "infrastructure",
+    },
+  });
+  await recordOperationalAlert({
+    organizationId: run.organizationId,
+    runId,
+    severity: "critical",
+    code: "workflow.assessment_failed",
+    eventName: "workflow.failed",
+    metadata: {
+      run_kind: run.kind,
+      failure_category: "infrastructure",
+      outcome: "failed",
+    },
+  });
 }
 
 /**

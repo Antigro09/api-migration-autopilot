@@ -8,6 +8,8 @@ import type { GitHubAppKind } from "@/lib/integrations/github";
 import { integrationReadiness, requireSecret } from "@/lib/platform/config";
 import { verifyGitHubWebhookSignature } from "@/lib/security/webhooks";
 import { TriggerWorkflowEngine } from "@/lib/workflows/engine";
+import { recordOperationalAlert } from "@/lib/data/alerts";
+import { emitTelemetry } from "@/lib/telemetry";
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const DELIVERY_ID = /^[a-zA-Z0-9-]{1,100}$/;
@@ -39,11 +41,29 @@ export async function handleGitHubWebhook(
 ): Promise<Response> {
   const contentLength = Number(request.headers.get("content-length") ?? "0");
   if (contentLength > MAX_WEBHOOK_BYTES) {
+    void emitTelemetry({
+      name: "security.webhook_rejected",
+      metadata: {
+        provider: "github",
+        operation: "payload_too_large",
+        outcome: "rejected",
+        severity: "warning",
+      },
+    });
     return Response.json({ error: "payload_too_large" }, { status: 413 });
   }
   const deliveryId = request.headers.get("x-github-delivery") ?? "";
   const eventName = request.headers.get("x-github-event") ?? "";
   if (!DELIVERY_ID.test(deliveryId) || !EVENT_NAME.test(eventName)) {
+    void emitTelemetry({
+      name: "security.webhook_rejected",
+      metadata: {
+        provider: "github",
+        operation: "invalid_headers",
+        outcome: "rejected",
+        severity: "warning",
+      },
+    });
     return Response.json({ error: "invalid_headers" }, { status: 400 });
   }
   const rawBody = await request.text();
@@ -57,6 +77,16 @@ export async function handleGitHubWebhook(
       secretFor(appKind),
     )
   ) {
+    void emitTelemetry({
+      name: "security.webhook_rejected",
+      correlationId: deliveryId,
+      metadata: {
+        provider: "github",
+        operation: "invalid_signature",
+        outcome: "rejected",
+        severity: "warning",
+      },
+    });
     return Response.json({ error: "invalid_signature" }, { status: 401 });
   }
 
@@ -135,16 +165,19 @@ export async function handleGitHubWebhook(
     } else {
       await markWebhookProcessed(deliveryId, "workflow_not_configured");
     }
-  } catch (error) {
-    console.error("GitHub webhook processing failed", {
-      deliveryId,
-      appKind,
-      eventName,
-      error:
-        error instanceof Error
-          ? { name: error.name, message: error.message }
-          : "unknown",
-    });
+  } catch {
+    await recordOperationalAlert({
+      severity: "critical",
+      code: "github.webhook_processing_failed",
+      eventName: "security.webhook_rejected",
+      metadata: {
+        provider: "github",
+        integration:
+          appKind === "scanner" ? "github_scanner" : "github_patcher",
+        operation: "webhook_processing",
+        outcome: "failed",
+      },
+    }).catch(() => undefined);
     await markWebhookProcessed(deliveryId, "processing_failed");
   }
 

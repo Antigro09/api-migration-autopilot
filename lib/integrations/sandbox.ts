@@ -1,4 +1,4 @@
-import { CommandExitError, Sandbox } from "e2b";
+import { CommandExitError, Sandbox, type SandboxOpts } from "e2b";
 import { normalizeRepositoryPath } from "@/lib/migration/patch-security";
 import { requireSecret } from "@/lib/platform/config";
 
@@ -69,6 +69,47 @@ const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_COMMANDS = 8;
 const MAX_RUNTIME_MS = 20 * 60 * 1_000;
 const MAX_PREPARED_DEPENDENCY_BYTES = 256 * 1024 * 1024;
+const ARCHIVE_VALIDATOR_PATH = "/tmp/autopilot-validate-archive.py";
+const ARCHIVE_VALIDATOR = String.raw`
+import pathlib
+import stat
+import sys
+import tarfile
+import zipfile
+
+archive_path, archive_kind = sys.argv[1], sys.argv[2]
+entries = []
+if archive_kind == "zip":
+    with zipfile.ZipFile(archive_path) as archive:
+        for item in archive.infolist():
+            mode = (item.external_attr >> 16) & 0o170000
+            entries.append((item.filename, item.file_size, mode == stat.S_IFLNK))
+elif archive_kind == "tar.gz":
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for item in archive.getmembers():
+            entries.append((
+                item.name,
+                item.size,
+                item.issym() or item.islnk() or item.isdev(),
+            ))
+else:
+    raise SystemExit(86)
+
+if len(entries) > 20000 or sum(size for _, size, _ in entries) > 536870912:
+    raise SystemExit(86)
+for name, _, unsafe_type in entries:
+    path = pathlib.PurePosixPath(name)
+    if (
+        not name
+        or "\\" in name
+        or path.is_absolute()
+        or ".." in path.parts
+        or ".git" in path.parts
+        or "node_modules" in path.parts
+        or unsafe_type
+    ):
+        raise SystemExit(86)
+`;
 
 const INSTALL_COMMANDS = new Set([
   "npm ci --ignore-scripts",
@@ -126,6 +167,11 @@ function validateOverlay(files: readonly SandboxOverlayFile[]): void {
   }
 }
 
+export type SandboxCreator = (
+  template: string,
+  options?: SandboxOpts,
+) => Promise<Sandbox>;
+
 function validateDependencyFiles(
   files: readonly SandboxOverlayFile[],
 ): void {
@@ -157,6 +203,18 @@ function validateDependencyFiles(
   if (total > 10 * 1024 * 1024) {
     throw new Error("Dependency preparation files exceed the 10 MiB limit.");
   }
+}
+
+async function validateArchiveBeforeExtraction(
+  sandbox: Sandbox,
+  archivePath: string,
+  archiveFormat: "zip" | "tar.gz",
+): Promise<void> {
+  await sandbox.files.write(ARCHIVE_VALIDATOR_PATH, ARCHIVE_VALIDATOR);
+  await sandbox.commands.run(
+    `python3 ${ARCHIVE_VALIDATOR_PATH} ${archivePath} ${archiveFormat}`,
+    { requestTimeoutMs: 120_000 },
+  );
 }
 
 function registryCidrs(): string[] {
@@ -254,6 +312,11 @@ async function executeSandboxCommands(
 }
 
 export class E2BSandboxRunner implements SandboxRunner {
+  constructor(
+    private readonly createSandbox: SandboxCreator = (template, options) =>
+      Sandbox.create(template, options),
+  ) {}
+
   async run(input: {
     phase: SandboxPhase;
     archive: ArrayBuffer;
@@ -297,7 +360,7 @@ export class E2BSandboxRunner implements SandboxRunner {
       };
     }
 
-    const sandbox = await Sandbox.create(requireSecret("E2B_TEMPLATE_ID"), {
+    const sandbox = await this.createSandbox(requireSecret("E2B_TEMPLATE_ID"), {
       apiKey: requireSecret("E2B_API_KEY"),
       timeoutMs: MAX_RUNTIME_MS,
       secure: true,
@@ -323,6 +386,11 @@ export class E2BSandboxRunner implements SandboxRunner {
           ? "/home/user/repository.zip"
           : "/home/user/repository.tar.gz";
       await sandbox.files.write(archivePath, input.archive);
+      await validateArchiveBeforeExtraction(
+        sandbox,
+        archivePath,
+        input.archiveFormat,
+      );
       const extractCommand =
         input.archiveFormat === "zip"
           ? "mkdir -p /home/user/repository && unzip -q /home/user/repository.zip -d /home/user/repository"
@@ -331,6 +399,10 @@ export class E2BSandboxRunner implements SandboxRunner {
         cwd: "/home/user",
         requestTimeoutMs: 120_000,
       });
+      await sandbox.commands.run(
+        "if find /home/user/repository -xdev \\( -type l -o -type b -o -type c -o -type p -o -type s \\) -print -quit | grep -q .; then exit 86; fi",
+        { requestTimeoutMs: 30_000 },
+      );
       const rootResult = await sandbox.commands.run(
         "find /home/user/repository -mindepth 1 -maxdepth 1 -type d -print -quit",
         { requestTimeoutMs: 30_000 },
@@ -418,7 +490,7 @@ export class E2BSandboxRunner implements SandboxRunner {
 
     const apiKey = requireSecret("E2B_API_KEY");
     const templateId = requireSecret("E2B_TEMPLATE_ID");
-    const preparation = await Sandbox.create(templateId, {
+    const preparation = await this.createSandbox(templateId, {
       apiKey,
       timeoutMs: MAX_RUNTIME_MS,
       secure: true,
@@ -498,7 +570,7 @@ export class E2BSandboxRunner implements SandboxRunner {
       await preparation.kill();
     }
 
-    const validation = await Sandbox.create(templateId, {
+    const validation = await this.createSandbox(templateId, {
       apiKey,
       timeoutMs: MAX_RUNTIME_MS,
       secure: true,
@@ -528,6 +600,11 @@ export class E2BSandboxRunner implements SandboxRunner {
           ? "/home/user/repository.zip"
           : "/home/user/repository.tar.gz";
       await validation.files.write(sourceArchive, input.archive);
+      await validateArchiveBeforeExtraction(
+        validation,
+        sourceArchive,
+        input.archiveFormat,
+      );
       const extractSource =
         input.archiveFormat === "zip"
           ? "rm -rf /tmp/autopilot-source && mkdir -p /tmp/autopilot-source && unzip -q /home/user/repository.zip -d /tmp/autopilot-source && source_root=$(find /tmp/autopilot-source -mindepth 1 -maxdepth 1 -type d -print -quit) && cp -a \"$source_root\"/. /home/user/repository/"
@@ -535,6 +612,10 @@ export class E2BSandboxRunner implements SandboxRunner {
       await validation.commands.run(
         `tar -xzf /home/user/prepared-dependencies.tar.gz -C ${repositoryRoot} && ${extractSource}`,
         { requestTimeoutMs: 180_000 },
+      );
+      await validation.commands.run(
+        "if find /home/user/repository -xdev \\( -path '/home/user/repository/node_modules' -prune \\) -o \\( -type l -o -type b -o -type c -o -type p -o -type s \\) -print -quit | grep -q .; then exit 86; fi",
+        { requestTimeoutMs: 30_000 },
       );
       for (const file of input.overlayFiles ?? []) {
         await validation.files.write(

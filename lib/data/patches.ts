@@ -19,9 +19,11 @@ import { VALIDATION_CATEGORIES } from "@/lib/migration/patch-validation";
 import { publicAppUrl } from "@/lib/platform/config";
 import { TriggerWorkflowEngine } from "@/lib/workflows/engine";
 import { storeRunArtifact } from "./artifacts";
+import { recordOperationalAlert } from "./alerts";
 import { activeConsent } from "./consent";
 import { appendAuditEvent } from "./control-plane";
 import { enqueueRunArtifactDeletion } from "./retention";
+import { processWorkflowResult } from "./workflow-results";
 
 export type PatchWorkPacket = {
   runId: string;
@@ -74,6 +76,11 @@ const PATCH_REQUEST_STATES: readonly RepositoryMigrationState[] = [
 ];
 
 const PATCH_ARTIFACT_KEY = (runId: string) => `runs/${runId}/patch.json`;
+const PATCH_FILE_ARTIFACT_KEY = (
+  runId: string,
+  index: number,
+  pathHash: string,
+) => `runs/${runId}/review/${index.toString().padStart(4, "0")}-${pathHash}.json`;
 const LOG_ARTIFACT_KEY = (runId: string, category: string) =>
   `runs/${runId}/logs/${category}.log`;
 const MANIFEST_ARTIFACT_KEY = (runId: string) => `runs/${runId}/manifest.json`;
@@ -685,6 +692,78 @@ export async function submitPatchResult(input: {
 }): Promise<{ state: string; integrityValid: boolean }> {
   await ensureDatabaseSchema();
   const database = getD1();
+  const owner = await database
+    .prepare(
+      `SELECT organization_id AS organizationId
+       FROM migration_runs
+       WHERE id = ? AND kind = 'patch'
+       LIMIT 1`,
+    )
+    .bind(input.runId)
+    .first<{ organizationId: string }>();
+  if (!owner) {
+    throw new DomainError("NOT_FOUND", "The patch run was not found.");
+  }
+  return processWorkflowResult({
+    runId: input.runId,
+    organizationId: owner.organizationId,
+    kind: "patch",
+    payload: input.result,
+    process: () => persistPatchResult(input),
+    recoverCompleted: async () => {
+      const completed = await database
+        .prepare(
+          `SELECT mr.state, mr.failure_code AS failureCode,
+                  p.integrity_checks AS integrityChecks
+           FROM migration_runs mr
+           LEFT JOIN patches p
+             ON p.run_id = mr.id AND p.organization_id = mr.organization_id
+           WHERE mr.id = ? AND mr.organization_id = ?
+           LIMIT 1`,
+        )
+        .bind(input.runId, owner.organizationId)
+        .first<{
+          state: string;
+          failureCode: string | null;
+          integrityChecks: string | null;
+        }>();
+      if (
+        completed?.state === "failed" &&
+        completed.failureCode === "patch_boundary_rejected"
+      ) {
+        return { state: "failed", integrityValid: false };
+      }
+      if (
+        completed &&
+        [
+          "awaiting_review",
+          "validation_failed",
+          "validation_incomplete",
+          "approved",
+          "pr_open",
+          "merged",
+          "verified",
+        ].includes(completed.state) &&
+        completed.integrityChecks
+      ) {
+        const checks = JSON.parse(completed.integrityChecks) as {
+          valid?: unknown;
+        };
+        if (checks.valid === true) {
+          return { state: completed.state, integrityValid: true };
+        }
+      }
+      return null;
+    },
+  });
+}
+
+async function persistPatchResult(input: {
+  runId: string;
+  result: PatchRunResult;
+}): Promise<{ state: string; integrityValid: boolean }> {
+  await ensureDatabaseSchema();
+  const database = getD1();
   const run = await database
     .prepare(
       `SELECT
@@ -881,6 +960,34 @@ export async function submitPatchResult(input: {
       files: input.result.files,
     }),
   });
+  const patchId = id("pch");
+  const reviewFiles: Array<{
+    id: string;
+    artifactId: string;
+    path: string;
+    additions: number;
+    deletions: number;
+  }> = [];
+  for (const [index, file] of input.result.files.entries()) {
+    const summary = summarizeEdits([file]);
+    const pathHash = (await sha256Of(file.path)).slice(0, 24);
+    const artifact = await storeRunArtifact({
+      organizationId: run.organizationId,
+      runId: input.runId,
+      campaignId: run.campaignId,
+      kind: "patch_file",
+      storageKey: PATCH_FILE_ARTIFACT_KEY(input.runId, index, pathHash),
+      contentType: "application/json",
+      plaintext: JSON.stringify(file),
+    });
+    reviewFiles.push({
+      id: id("prf"),
+      artifactId: artifact.id,
+      path: file.path,
+      additions: summary.additions,
+      deletions: summary.deletions,
+    });
+  }
 
   const logArtifactIds = new Map<string, string>();
   for (const log of input.result.validationLogs) {
@@ -992,14 +1099,10 @@ export async function submitPatchResult(input: {
         `INSERT INTO patches (
           id, organization_id, run_id, artifact_id, base_sha, sha256,
           size_bytes, integrity_checks
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(run_id, sha256) DO UPDATE SET
-          artifact_id = excluded.artifact_id,
-          size_bytes = excluded.size_bytes,
-          integrity_checks = excluded.integrity_checks`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
-        id("pch"),
+        patchId,
         run.organizationId,
         input.runId,
         patchArtifact.id,
@@ -1040,6 +1143,27 @@ export async function submitPatchResult(input: {
         run.organizationId,
       ),
   ];
+  for (const file of reviewFiles) {
+    statements.push(
+      database
+        .prepare(
+          `INSERT INTO patch_review_files (
+            id, organization_id, run_id, patch_id, artifact_id,
+            path, additions, deletions
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          file.id,
+          run.organizationId,
+          input.runId,
+          patchId,
+          file.artifactId,
+          file.path,
+          file.additions,
+          file.deletions,
+        ),
+    );
+  }
   for (const entry of validationResults) {
     statements.push(
       database
@@ -1210,5 +1334,17 @@ export async function failPatchRun(
     aggregateId: runId,
     action: "patch.failed",
     payload: { failureCode: failureCode.slice(0, 128), category },
+  });
+  await recordOperationalAlert({
+    organizationId: run.organizationId,
+    runId,
+    severity: category === "infrastructure" ? "critical" : "warning",
+    code: "workflow.patch_failed",
+    eventName: "workflow.failed",
+    metadata: {
+      run_kind: "patch",
+      failure_category: category,
+      outcome: "failed",
+    },
   });
 }

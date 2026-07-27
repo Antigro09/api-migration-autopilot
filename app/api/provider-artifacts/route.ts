@@ -12,6 +12,7 @@ import {
 } from "@/lib/http/responses";
 import type { ProviderArtifactKind } from "@/lib/provider/artifact-intake";
 import { assertSameOrigin } from "@/lib/security/requests";
+import { enforceRateLimit } from "@/lib/security/rate-limit";
 
 export const dynamic = "force-dynamic";
 const MAX_REQUEST_BYTES = 12 * 1024 * 1024;
@@ -80,6 +81,12 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
     const actor = await requireAuthenticatedActor();
+    await enforceRateLimit({
+      subject: actor.id,
+      operation: "provider-artifact.create",
+      limit: 20,
+      windowSeconds: 3_600,
+    });
     const form = await readBoundedFormData(request);
     const organizationId = String(form.get("organizationId") ?? "");
     const context = await resolveTenant(actor.id, organizationId || undefined);

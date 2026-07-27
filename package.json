@@ -1,6 +1,6 @@
 {
   "name": "api-migration-autopilot",
-  "version": "0.3.0-alpha.1",
+  "version": "0.4.0-alpha.1",
   "private": true,
   "engines": {
     "node": ">=24.0.0"
@@ -20,9 +20,12 @@
     "trigger:deploy": "trigger deploy --skip-update-check"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@opentelemetry/api": "^1.9.1",
     "@trigger.dev/sdk": "^4.5.7",
     "drizzle-orm": "0.45.2",
     "e2b": "^2.14.0",
+    "monaco-editor": "0.53.0",
     "next": "16.2.12",
     "parse5": "^8.0.0",
     "react": "19.2.8",

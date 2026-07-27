@@ -33,8 +33,9 @@ an unconfigured external service is visibly unavailable.
   including npm, pnpm, Yarn Classic/Berry, lockfiles, and workspaces
 - TypeScript/ts-morph symbol indexing in a no-network E2B analyzer that never
   executes repository code, plus optional consent-gated model classification
-- Source-minimized signed callbacks, exact provider evidence, encrypted
-  assessment manifests, and customer-only scanned/skipped scope
+- Source-minimized signed callbacks with durable exact-result receipts,
+  concurrent-delivery exclusion, exact replay responses, encrypted assessment
+  manifests, and customer-only scanned/skipped scope
 - Deterministic Stripe codemods, patch hashing/security checks, constrained
   OpenAI and E2B adapters, and idempotent draft-PR publication primitives
 - D1 persistence, R2 encrypted-artifact boundary, tenant filters, and
@@ -47,18 +48,31 @@ an unconfigured external service is visibly unavailable.
 - Independent control-plane re-validation of every patch: a patch that fails
   allowed-path, workflow-file, binary, size, base-commit, or hash checks is
   never persisted as reviewable work
-- Customer patch review with a real file-by-file diff, evidence, validation
-  results, integrity issues, and the exact canonical patch SHA-256
+- Customer patch review with independently encrypted, expiring per-file
+  artifacts; the initial page contains metadata only and self-hosted Monaco
+  decrypts one tenant-checked file on demand with a keyboard-readable fallback
+- Evidence, validation results, integrity issues, unresolved risk, and the
+  exact canonical patch SHA-256 remain visible throughout review
 - Exact-hash approval bound to an approver membership, then idempotent draft-PR
   publication that rechecks the default-branch commit immediately before writing
 - Post-merge verification scans that keep `merged` and `verified` distinct
 - Retention automation: a 24-hour interrupted-run sweeper, 30-day artifact
   expiry, storage-verified deletion, retry with backoff, a dead-letter state,
   customer export, and customer-requested early erasure
+- Internal operations with redacted run health and usage, immutable safe
+  retries, deletion recovery, audit-chain verification, and provider branding
+  approval
+- Customer-approved support requests scoped to one run and at most 24 hours;
+  every source-bearing read is tenant-checked, expiry-checked, and audited
+- A fail-closed telemetry boundary for OpenTelemetry, Sentry, and metadata-only
+  PostHog, plus persisted operational alerts with acknowledge/resolve controls
+- Private-cache browser responses, a restrictive content policy, rate limits
+  on expensive operations, accessibility checks across every product view, and
+  production bundle budgets
 
-The next implementation phase is operations, observability, release hardening,
-lazy Monaco patch loading, and live external-account acceptance. See
-[CLAUDE_HANDOFF.md](./CLAUDE_HANDOFF.md).
+The remaining release condition is live external-account acceptance. No local
+test is represented as proof of a real GitHub, Trigger.dev, E2B, OpenAI,
+Resend, DNS, pull-request, merge, or deletion run.
 
 ## Architecture
 
@@ -159,13 +173,13 @@ setup, failure classification, safe retries, and incident response.
 
 ## Status
 
-Version: `0.3.0-alpha.1`.
+Version: `0.4.0-alpha.1`.
 
 Private hosted control plane:
 [api-migration-autopilot.young-corgi-3741.chatgpt.site](https://api-migration-autopilot.young-corgi-3741.chatgpt.site).
 Access is owner-only until collaborators are explicitly added.
 
-This is a real but incomplete private alpha. External credentials and partner
-accounts are intentionally not committed. The system fails closed when they
-are absent. See [docs/acceptance-audit.md](./docs/acceptance-audit.md) for the
-line between locally verified code and live-account acceptance.
+This is a real private production alpha with live external acceptance still
+pending. External credentials and partner accounts are intentionally not
+committed. The system fails closed when they are absent. See
+[docs/acceptance-audit.md](./docs/acceptance-audit.md) for the exact boundary.

@@ -22,6 +22,7 @@ export type FileDiff = {
 };
 
 const MAX_DIFF_LINES = 4_000;
+const MAX_DIFF_CELLS = 1_000_000;
 const CONTEXT_LINES = 3;
 
 type Operation = { kind: DiffLine["kind"]; text: string };
@@ -81,6 +82,49 @@ function longestCommonSubsequence(
   return operations;
 }
 
+/**
+ * Produces a valid, deliberately coarse diff without a quadratic allocation.
+ * Monaco still receives the complete file contents; this path only affects the
+ * accessible text fallback for large or heavily changed files.
+ */
+function boundedOperations(
+  before: readonly string[],
+  after: readonly string[],
+): Operation[] {
+  let prefix = 0;
+  while (
+    prefix < before.length &&
+    prefix < after.length &&
+    before[prefix] === after[prefix]
+  ) {
+    prefix += 1;
+  }
+
+  let suffix = 0;
+  while (
+    suffix < before.length - prefix &&
+    suffix < after.length - prefix &&
+    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+
+  return [
+    ...before
+      .slice(0, prefix)
+      .map((text): Operation => ({ kind: "context", text })),
+    ...before
+      .slice(prefix, before.length - suffix)
+      .map((text): Operation => ({ kind: "removed", text })),
+    ...after
+      .slice(prefix, after.length - suffix)
+      .map((text): Operation => ({ kind: "added", text })),
+    ...before
+      .slice(before.length - suffix)
+      .map((text): Operation => ({ kind: "context", text })),
+  ];
+}
+
 export function createFileDiff(input: {
   path: string;
   originalContent: string;
@@ -88,12 +132,17 @@ export function createFileDiff(input: {
 }): FileDiff {
   const before = input.originalContent.split("\n");
   const after = input.newContent.split("\n");
+  const boundedBefore = before.slice(0, MAX_DIFF_LINES);
+  const boundedAfter = after.slice(0, MAX_DIFF_LINES);
+  const exceedsCellBudget =
+    boundedBefore.length * boundedAfter.length > MAX_DIFF_CELLS;
   const truncated =
-    before.length > MAX_DIFF_LINES || after.length > MAX_DIFF_LINES;
-  const operations = longestCommonSubsequence(
-    before.slice(0, MAX_DIFF_LINES),
-    after.slice(0, MAX_DIFF_LINES),
-  );
+    before.length > MAX_DIFF_LINES ||
+    after.length > MAX_DIFF_LINES ||
+    exceedsCellBudget;
+  const operations = exceedsCellBudget
+    ? boundedOperations(boundedBefore, boundedAfter)
+    : longestCommonSubsequence(boundedBefore, boundedAfter);
 
   const lines: DiffLine[] = [];
   let originalLine = 0;

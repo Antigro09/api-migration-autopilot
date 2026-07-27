@@ -292,21 +292,19 @@ export default async function Home({ searchParams }: HomeProps) {
       <a className="skip-link" href="#product-content">
         Skip to content
       </a>
-      <div id="product-content">
-        <ProductShell
-          surface={surface}
-          requestedView={requestedView}
-          workspace={context.workspace}
-          actor={actor}
-          providerData={providerData}
-          operationsData={operationsData}
-          customerData={customerData}
-          patchReview={patchReview}
-          consentDisclosure={MODEL_CONSENT_DISCLOSURE}
-          integrations={integrations}
-          flash={flashFromQuery(query)}
-        />
-      </div>
+      <ProductShell
+        surface={surface}
+        requestedView={requestedView}
+        workspace={context.workspace}
+        actor={actor}
+        providerData={providerData}
+        operationsData={operationsData}
+        customerData={customerData}
+        patchReview={patchReview}
+        consentDisclosure={MODEL_CONSENT_DISCLOSURE}
+        integrations={integrations}
+        flash={flashFromQuery(query)}
+      />
     </>
   );
 }

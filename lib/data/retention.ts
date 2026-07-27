@@ -3,7 +3,10 @@ import { ensureDatabaseSchema } from "@/db/runtime";
 import type { TenantContext } from "@/lib/domain";
 import { DomainError } from "@/lib/domain/errors";
 import { R2ArtifactStore } from "@/lib/platform/artifacts";
+import { emitTelemetry } from "@/lib/telemetry";
+import { recordOperationalAlert } from "./alerts";
 import { appendAuditEvent } from "./control-plane";
+import { deleteExpiredRateLimits } from "@/lib/security/rate-limit";
 
 export type DeletionReason =
   | "run_completed"
@@ -16,6 +19,7 @@ export type RetentionSweepReport = {
   deleted: number;
   retried: number;
   deadLettered: number;
+  expiredRateLimitBuckets: number;
 };
 
 /** Run states that must not linger; anything older than the TTL is swept. */
@@ -102,6 +106,7 @@ export async function enqueueRunArtifactDeletion(input: {
     "repository_archive",
     "affected_snippets",
     "patch",
+    "patch_file",
     "validation_log",
   ];
   const placeholders = kinds.map(() => "?").join(", ");
@@ -202,6 +207,19 @@ async function sweepInterruptedRuns(now: Date): Promise<number> {
       action: "run.interrupted_ttl_swept",
       payload: { previousState: run.state, ttlHours: 24 },
     });
+    await recordOperationalAlert({
+      organizationId: run.organizationId,
+      runId: run.id,
+      severity: "critical",
+      code: "retention.interrupted_run_ttl",
+      eventName: "retention.deadline_breached",
+      metadata: {
+        run_kind: run.kind,
+        run_state: run.state,
+        failure_category: "infrastructure",
+        outcome: "failed",
+      },
+    });
   }
   return stale.results.length;
 }
@@ -242,15 +260,20 @@ async function processDeletionQueue(
   const jobs = await database
     .prepare(
       `SELECT
-        id,
-        organization_id AS organizationId,
-        artifact_id AS artifactId,
-        storage_key AS storageKey,
-        reason,
-        attempt_count AS attemptCount
+        deletion_jobs.id,
+        deletion_jobs.organization_id AS organizationId,
+        deletion_jobs.artifact_id AS artifactId,
+        deletion_jobs.storage_key AS storageKey,
+        deletion_jobs.reason,
+        deletion_jobs.attempt_count AS attemptCount,
+        deletion_jobs.hard_deadline_at AS hardDeadlineAt,
+        a.run_id AS runId,
+        a.kind AS artifactKind
        FROM deletion_jobs
-       WHERE status = 'pending' AND next_attempt_at <= ?
-       ORDER BY hard_deadline_at ASC
+       JOIN artifacts a ON a.id = deletion_jobs.artifact_id
+       WHERE deletion_jobs.status = 'pending'
+         AND deletion_jobs.next_attempt_at <= ?
+       ORDER BY deletion_jobs.hard_deadline_at ASC
        LIMIT ?`,
     )
     .bind(now.toISOString(), Math.min(Math.max(limit, 1), 200))
@@ -261,6 +284,9 @@ async function processDeletionQueue(
       storageKey: string;
       reason: string;
       attemptCount: number;
+      hardDeadlineAt: string;
+      runId: string | null;
+      artifactKind: string;
     }>();
 
   let deleted = 0;
@@ -269,6 +295,21 @@ async function processDeletionQueue(
   const timestamp = now.toISOString();
 
   for (const job of jobs.results) {
+    if (Date.parse(job.hardDeadlineAt) <= now.getTime()) {
+      await recordOperationalAlert({
+        organizationId: job.organizationId,
+        ...(job.runId ? { runId: job.runId } : {}),
+        severity: "critical",
+        code: "retention.deletion_deadline_breached",
+        eventName: "retention.deadline_breached",
+        metadata: {
+          artifact_kind: job.artifactKind,
+          deletion_reason: job.reason,
+          attempt_count: Number(job.attemptCount),
+          outcome: "failed",
+        },
+      });
+    }
     const claim = await database
       .prepare(
         `UPDATE deletion_jobs
@@ -311,6 +352,17 @@ async function processDeletionQueue(
         action: "artifact.deletion_verified",
         payload: { reason: job.reason, attempts: attempt },
       });
+      await emitTelemetry({
+        name: "artifact.deleted",
+        organizationId: job.organizationId,
+        ...(job.runId ? { runId: job.runId } : {}),
+        metadata: {
+          artifact_kind: job.artifactKind,
+          deletion_reason: job.reason,
+          attempt_count: attempt,
+          outcome: "deleted",
+        },
+      }).catch(() => undefined);
       deleted += 1;
     } catch (error) {
       const code =
@@ -341,6 +393,19 @@ async function processDeletionQueue(
           aggregateId: job.artifactId,
           action: "artifact.deletion_dead_lettered",
           payload: { reason: job.reason, attempts: attempt, errorCode: code },
+        });
+        await recordOperationalAlert({
+          organizationId: job.organizationId,
+          ...(job.runId ? { runId: job.runId } : {}),
+          severity: "critical",
+          code: "retention.deletion_dead_lettered",
+          eventName: "retention.deletion_failed",
+          metadata: {
+            artifact_kind: job.artifactKind,
+            deletion_reason: job.reason,
+            attempt_count: attempt,
+            outcome: "failed",
+          },
         });
         deadLettered += 1;
       } else {
@@ -380,7 +445,13 @@ export async function sweepRetention(options?: {
   const interruptedRuns = await sweepInterruptedRuns(now);
   const expiredArtifacts = await queueExpiredArtifacts(now);
   const queue = await processDeletionQueue(now, options?.limit ?? 100);
-  return { interruptedRuns, expiredArtifacts, ...queue };
+  const expiredRateLimitBuckets = await deleteExpiredRateLimits(now);
+  return {
+    interruptedRuns,
+    expiredArtifacts,
+    expiredRateLimitBuckets,
+    ...queue,
+  };
 }
 
 export type CustomerDeletionRequest = {

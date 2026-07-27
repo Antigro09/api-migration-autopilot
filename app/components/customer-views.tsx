@@ -11,6 +11,7 @@ import {
   StatusPill,
   type AppView,
 } from "./ui";
+import { LazyPatchDiff } from "./lazy-patch-diff";
 
 function GitHubInstallButton({
   kind,
@@ -633,61 +634,6 @@ function PatchRequestForm({
   );
 }
 
-function DiffView({ diff }: { diff: PatchReviewData["selectedDiff"] }) {
-  if (!diff || diff.hunks.length === 0) {
-    return (
-      <div className="code-empty">
-        <div className="line-numbers" aria-hidden="true">
-          <span>1</span>
-        </div>
-        <pre>
-          <code>
-            <span className="code-comment">
-              {"// Select a changed file to load its verified diff."}
-            </span>
-          </code>
-        </pre>
-      </div>
-    );
-  }
-  return (
-    <div className="diff-lines" role="table" aria-label={`Diff for ${diff.path}`}>
-      {diff.hunks.map((hunk, hunkIndex) => (
-        <div className="diff-hunk" key={`${hunk.originalStart}-${hunkIndex}`}>
-          <div className="diff-hunk-header" role="row">
-            @@ -{hunk.originalStart},{hunk.originalCount} +{hunk.newStart},
-            {hunk.newCount} @@
-          </div>
-          {hunk.lines.map((line, lineIndex) => (
-            <div
-              className={`diff-line diff-line-${line.kind}`}
-              role="row"
-              key={`${hunkIndex}-${lineIndex}`}
-            >
-              <span className="diff-gutter" aria-hidden="true">
-                {line.originalLine ?? ""}
-              </span>
-              <span className="diff-gutter" aria-hidden="true">
-                {line.newLine ?? ""}
-              </span>
-              <span className="diff-marker" aria-hidden="true">
-                {line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " "}
-              </span>
-              <code>{line.text || " "}</code>
-            </div>
-          ))}
-        </div>
-      ))}
-      {diff.truncated ? (
-        <p className="diff-truncated">
-          This file exceeds the review line limit and the diff is truncated.
-          Review the full change in the pull request before merging.
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 function PatchReview({
   data,
   review,
@@ -730,7 +676,6 @@ function PatchReview({
     );
   }
 
-  const selected = review.files.find((file) => file.path === review.selectedPath);
   const approved = Boolean(review.approvedPatchSha256);
   const canApprove = review.publishable && !approved;
   const failedValidation = review.validation.filter(
@@ -847,139 +792,34 @@ function PatchReview({
         </form>
       </section>
 
-      <div className="diff-workspace">
-        <aside className="file-tree">
-          <div className="diff-panel-header">
-            <strong>Changed files</strong>
-            <span>{review.files.length}</span>
-          </div>
-          <nav className="file-tree-list" aria-label="Changed files">
-            {review.files.map((file) => (
-              <a
-                key={file.path}
-                href={`/?view=patch&migration=${encodeURIComponent(
-                  review.migrationId,
-                )}&file=${encodeURIComponent(file.path)}`}
-                className={
-                  file.path === review.selectedPath
-                    ? "file-tree-item file-tree-item-active"
-                    : "file-tree-item"
-                }
-                aria-current={file.path === review.selectedPath ? "true" : undefined}
-              >
-                <span className="file-tree-path">{file.path}</span>
-                <span className="file-tree-counts">
-                  <i className="addition-dot" aria-hidden="true" />
-                  {file.additions}
-                  <i className="deletion-dot" aria-hidden="true" />
-                  {file.deletions}
-                </span>
-              </a>
+      <LazyPatchDiff
+        organizationId={workspaceId}
+        runId={review.runId}
+        baseSha={review.baseSha}
+        files={review.files}
+        initialPath={review.selectedPath}
+        additions={review.additions}
+        deletions={review.deletions}
+        unresolvedFindingCount={review.unresolvedFindingCount}
+        integrityValid={review.integrityValid}
+        modelConsentGranted={review.modelConsentGranted}
+      />
+      {review.integrityIssues.length > 0 ? (
+        <section className="panel">
+          <SectionHeading
+            title="Integrity issues"
+            description="Publication remains blocked when any required integrity gate fails."
+          />
+          <ul className="evidence-issues">
+            {review.integrityIssues.map((issue, index) => (
+              <li key={`${issue.code}-${index}`}>
+                <code>{issue.code}</code>
+                <span>{issue.message}</span>
+              </li>
             ))}
-          </nav>
-          <div className="diff-summary">
-            <span>
-              <i className="addition-dot" /> {review.additions} additions
-            </span>
-            <span>
-              <i className="deletion-dot" /> {review.deletions} deletions
-            </span>
-          </div>
-        </aside>
-
-        <section className="diff-panel" aria-label="Patch diff">
-          <div className="diff-panel-header">
-            <div className="diff-file">
-              <span aria-hidden="true">⌘</span>
-              <span>{review.selectedPath ?? "No file selected"}</span>
-            </div>
-            <span className="mono">base {review.baseSha.slice(0, 12)}</span>
-          </div>
-          <DiffView diff={review.selectedDiff} />
-          <div className="diff-footer">
-            <span>
-              Integrity {review.integrityValid ? "passed" : "failed"}
-            </span>
-            <span>Allowed paths {review.files.length}</span>
-            <span>Unresolved findings {review.unresolvedFindingCount}</span>
-          </div>
+          </ul>
         </section>
-
-        <aside className="evidence-rail">
-          <div className="diff-panel-header">
-            <strong>Evidence</strong>
-            <StatusPill tone={review.integrityValid ? "success" : "danger"}>
-              {review.integrityValid ? "Verified" : "Blocked"}
-            </StatusPill>
-          </div>
-          <div className="evidence-fields">
-            <DefinitionRow
-              label="Rules"
-              value={selected?.ruleIds.join(", ") || "—"}
-            />
-            <DefinitionRow
-              label="Transformation"
-              value={
-                selected?.transformations
-                  .map((transformation) =>
-                    transformation === "deterministic_codemod"
-                      ? "Deterministic codemod"
-                      : transformation === "parameterized_template"
-                        ? "Parameterized template"
-                        : "Model residual",
-                  )
-                  .join(", ") || "—"
-              }
-            />
-            <DefinitionRow
-              label="Rationale"
-              value={selected?.rationale.join(" ") || "—"}
-            />
-            <DefinitionRow
-              label="Confidence"
-              value={
-                selected?.evidence.length
-                  ? selected.evidence
-                      .map(
-                        (entry) =>
-                          `${entry.ruleId}: ${Math.round(entry.confidence * 100)}% (${entry.classification.replace("_", " ")})`,
-                      )
-                      .join("; ")
-                  : "—"
-              }
-            />
-            <DefinitionRow
-              label="Provider sources"
-              value={
-                selected?.evidence
-                  .flatMap((entry) => entry.sources)
-                  .filter(
-                    (source, index, sources) => sources.indexOf(source) === index,
-                  )
-                  .join("; ") || "—"
-              }
-            />
-            <DefinitionRow
-              label="Known limitations"
-              value={selected?.knownLimitations.join(" ") || "None recorded"}
-            />
-            <DefinitionRow
-              label="Model consent"
-              value={review.modelConsentGranted ? "Granted" : "Not granted"}
-            />
-          </div>
-          {review.integrityIssues.length > 0 ? (
-            <ul className="evidence-issues">
-              {review.integrityIssues.map((issue, index) => (
-                <li key={`${issue.code}-${index}`}>
-                  <code>{issue.code}</code>
-                  <span>{issue.message}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </aside>
-      </div>
+      ) : null}
 
       <section className="panel validation-panel">
         <SectionHeading
@@ -1057,6 +897,11 @@ function Policies({
   const migrations = data?.migrations ?? [];
   const selected = review?.migrationId ?? migrations[0]?.id ?? "";
   const granted = review?.modelConsentGranted ?? false;
+  const supportRequests =
+    data?.supportAccess.requests.filter((request) => request.status === "pending") ??
+    [];
+  const activeSupportGrants =
+    data?.supportAccess.grants.filter((grant) => grant.active) ?? [];
   return (
     <>
       <PageHeading
@@ -1275,6 +1120,126 @@ function Policies({
               </form>
             </div>
           </section>
+
+          <section className="panel">
+            <SectionHeading
+              title="Support access requests"
+              description="Only a customer admin or approver can grant access. Every grant is scoped to one run, lasts no more than 24 hours, and can be revoked immediately."
+              action={
+                <StatusPill
+                  tone={
+                    supportRequests.length > 0 || activeSupportGrants.length > 0
+                      ? "warning"
+                      : "success"
+                  }
+                >
+                  {supportRequests.length > 0
+                    ? `${supportRequests.length} pending`
+                    : activeSupportGrants.length > 0
+                      ? `${activeSupportGrants.length} active`
+                      : "No access"}
+                </StatusPill>
+              }
+            />
+            {supportRequests.length === 0 &&
+            activeSupportGrants.length === 0 ? (
+              <EmptyState
+                compact
+                symbol="✓"
+                title="Support has no source access"
+                description="No request is pending and no customer grant is active."
+              />
+            ) : (
+              <div className="support-access-records">
+                {supportRequests.map((request) => (
+                  <article className="support-access-record" key={request.id}>
+                    <div>
+                      <strong>Access requested for run</strong>
+                      <code>{request.runId}</code>
+                      <p>{request.reason}</p>
+                      <small>
+                        Requested for {request.requestedDurationMinutes} minutes ·{" "}
+                        {new Date(request.createdAt).toLocaleString("en-US")}
+                      </small>
+                    </div>
+                    <div className="support-decision-actions">
+                      <form
+                        action="/api/support/requests/resolve"
+                        method="post"
+                      >
+                        <input
+                          name="organizationId"
+                          type="hidden"
+                          value={workspaceId}
+                        />
+                        <input
+                          name="requestId"
+                          type="hidden"
+                          value={request.id}
+                        />
+                        <input name="decision" type="hidden" value="approve" />
+                        <button
+                          className="button button-primary button-small"
+                          type="submit"
+                        >
+                          Approve exact window
+                        </button>
+                      </form>
+                      <form
+                        action="/api/support/requests/resolve"
+                        method="post"
+                      >
+                        <input
+                          name="organizationId"
+                          type="hidden"
+                          value={workspaceId}
+                        />
+                        <input
+                          name="requestId"
+                          type="hidden"
+                          value={request.id}
+                        />
+                        <input name="decision" type="hidden" value="deny" />
+                        <button
+                          className="button button-secondary button-small"
+                          type="submit"
+                        >
+                          Deny
+                        </button>
+                      </form>
+                    </div>
+                  </article>
+                ))}
+                {activeSupportGrants.map((grant) => (
+                  <article className="support-access-record" key={grant.id}>
+                    <div>
+                      <strong>Active customer grant</strong>
+                      <code>{grant.runId}</code>
+                      <p>{grant.reason}</p>
+                      <small>
+                        Expires{" "}
+                        {new Date(grant.expiresAt).toLocaleString("en-US")}
+                      </small>
+                    </div>
+                    <form action="/api/support/grants/revoke" method="post">
+                      <input
+                        name="organizationId"
+                        type="hidden"
+                        value={workspaceId}
+                      />
+                      <input name="grantId" type="hidden" value={grant.id} />
+                      <button
+                        className="button button-danger button-small"
+                        type="submit"
+                      >
+                        Revoke now
+                      </button>
+                    </form>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
         </div>
 
         <aside className="policy-side">
@@ -1293,14 +1258,24 @@ function Policies({
           </section>
           <section className="panel">
             <div className="panel-kicker">Support access</div>
-            <h2>No active grant</h2>
+            <h2>
+              {activeSupportGrants.length > 0
+                ? `${activeSupportGrants.length} active grant${
+                    activeSupportGrants.length === 1 ? "" : "s"
+                  }`
+                : "No active grant"}
+            </h2>
             <p>
               Support cannot inspect source by default. Any access is
               customer-granted, time-limited, and audited.
             </p>
-            <button className="button button-secondary button-block" type="button" disabled>
-              No active support grant
-            </button>
+            <StatusPill
+              tone={activeSupportGrants.length > 0 ? "warning" : "success"}
+            >
+              {activeSupportGrants.length > 0
+                ? "Review active access"
+                : "Source access disabled"}
+            </StatusPill>
           </section>
         </aside>
       </div>
@@ -1308,7 +1283,7 @@ function Policies({
   );
 }
 
-function CustomerAudit() {
+function CustomerAudit({ data }: { data?: CustomerWorkspaceData }) {
   return (
     <>
       <PageHeading
@@ -1321,20 +1296,37 @@ function CustomerAudit() {
         <div className="table-toolbar">
           <div className="filter-control">
             <span aria-hidden="true">⌕</span>
-            <span>Filter audit events</span>
+            <span>Newest persisted events</span>
           </div>
-          <button className="button button-secondary button-small" type="button" disabled>
-            Export
-          </button>
+          <span className="filter-pill">
+            {data?.auditEvents.length ?? 0} events
+          </span>
         </div>
         <div className="audit-head">
           <span>Actor</span><span>Event</span><span>Resource</span><span>Time</span>
         </div>
-        <EmptyState
-          symbol="◌"
-          title="No customer audit events"
-          description="The first persisted policy, repository, assessment, or approval action will start this log."
-        />
+        {(data?.auditEvents.length ?? 0) === 0 ? (
+          <EmptyState
+            symbol="◌"
+            title="No customer audit events"
+            description="The first persisted policy, repository, assessment, or approval action will start this log."
+          />
+        ) : (
+          <div className="audit-records">
+            {data?.auditEvents.map((event) => (
+              <article className="audit-record" key={event.id}>
+                <span>{event.actorKind}</span>
+                <strong>{event.action}</strong>
+                <code>
+                  {event.aggregateType}:{event.aggregateId}
+                </code>
+                <time dateTime={event.occurredAt}>
+                  {new Date(event.occurredAt).toLocaleString("en-US")}
+                </time>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
     </>
   );
@@ -1371,7 +1363,7 @@ export function CustomerView({
       />
     );
   }
-  if (view === "audit") return <CustomerAudit />;
+  if (view === "audit") return <CustomerAudit data={data} />;
   return (
     <Migrations
       data={data}

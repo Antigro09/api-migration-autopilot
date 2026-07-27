@@ -1,6 +1,6 @@
 # Production acceptance audit
 
-Updated for `0.3.0-alpha.1`.
+Updated for `0.4.0-alpha.1`.
 
 This document distinguishes shipped code from live-account proof. A local test
 or production build is not represented as a successful GitHub, Trigger.dev,
@@ -24,12 +24,19 @@ E2B, OpenAI, Resend, or DNS run.
 | Provider privacy | Provider queries return customer-consented lifecycle aggregates without repository-derived details |
 | Spec-driven assessment | Approved `MigrationSpecV1` detectors drive npm/pnpm/Yarn/workspace resolution and TypeScript/ts-morph symbol-aware findings |
 | Offline analyzer boundary | Production task transfers normalized source but no credentials into a deny-all-network E2B analyzer and persists encrypted execution evidence |
+| Workflow callback idempotency | Durable exact-result receipts serialize concurrent delivery, return the original response on replay, and refuse a conflicting result |
+| Internal operations | Redacted provider/run/deletion/cost health, immutable safe retries, audit-chain verification, and persisted alert lifecycle |
+| Support access | Customer-approved, exact-run, 30-minute-to-24-hour grants with expiry and read auditing; no source access by default |
+| Telemetry boundary | Strict allowlist, salted opaque identifiers, source/credential rejection, and sanitized OTLP/Sentry/PostHog delivery |
+| Patch review delivery | Metadata-only initial response, encrypted expiring per-file artifacts, tenant-scoped lazy reads, self-hosted Monaco, and accessible fallback |
+| Browser abuse boundary | Private no-store responses, restrictive browser headers, persistent opaque-key rate limits, and static route trust-boundary checks |
+| Sandbox and model abuse | Archive/path/device limits, lifecycle-script refusal, IPv4/IPv6 isolation tests, bounded execution, prompt-injection-as-data, and fail-closed model errors |
 | Assessment evaluation | 24 purpose-built repositories, 38 expected candidates, 100% recall, 100% precision, and 100% status accuracy |
 
 Automated gate at this revision:
 
-- 42 unit/integration tests
-- 4 rendered-production-bundle tests
+- 84 unit/integration/security/accessibility tests
+- 6 rendered-production-bundle and payload-budget tests
 - 24-repository assessment evaluation: 100% recall, precision, and status accuracy
 - type checking, lint, and production build pass
 - Drizzle schema check passes
@@ -52,15 +59,12 @@ accounts:
 These are acceptance blockers, not simulated successes. The UI and adapters
 fail closed while configuration is absent.
 
-## Known implementation gaps
+## Deliberate hosting substitution
 
-- Patch review is a real server-rendered diff, but lazy Monaco per-file loading
-  is not implemented.
-- Internal operations now uses real redacted provider/run/deletion/audit data,
-  but support-grant workflows, OpenTelemetry/Sentry, metadata-only product
-  analytics, alerting, and complete redaction verification remain.
-- Hosted identity/storage use Sites identity, D1, and R2 rather than the
-  originally proposed WorkOS, Neon, and S3.
+Hosted identity/storage use Sites identity, D1, and R2 rather than WorkOS,
+Neon, and S3. The same organization, role, tenant, encryption, retention, and
+artifact boundaries are enforced in the production implementation; this is a
+deployment-stack choice, not a simulated product path.
 
 ## Acceptance rule
 
