@@ -23,7 +23,12 @@ export async function POST(request: Request): Promise<Response> {
       campaignId: String(body.campaignId ?? ""),
     });
     return Response.redirect(
-      new URL(`/?view=campaigns&launched=campaign`, request.url),
+      new URL(
+        `/?view=campaigns&organization=${encodeURIComponent(
+          context.workspace.organizationId,
+        )}&launched=campaign`,
+        request.url,
+      ),
       303,
     );
   } catch (error) {

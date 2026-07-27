@@ -158,7 +158,12 @@ function Migrations({
           <div className="migration-list">
             {data.migrations.map((migration) => (
               <a
-                href={`/?view=impact&migration=${encodeURIComponent(migration.id)}`}
+                href={appHref(
+                  "customer",
+                  "impact",
+                  workspaceId,
+                  { migration: migration.id },
+                )}
                 key={migration.id}
               >
                 <span>
@@ -293,7 +298,13 @@ function Migrations({
   );
 }
 
-function ImpactReport({ data }: { data?: CustomerWorkspaceData }) {
+function ImpactReport({
+  data,
+  workspaceId,
+}: {
+  data?: CustomerWorkspaceData;
+  workspaceId: string;
+}) {
   const migration = data?.selectedMigration;
   const summary = migration?.assessmentSummary;
   const findings = data?.selectedFindings ?? [];
@@ -352,7 +363,10 @@ function ImpactReport({ data }: { data?: CustomerWorkspaceData }) {
                   : "Install the Scanner App and complete a real assessment to populate this report."}
           </p>
         </div>
-        <a className="text-link" href={appHref("customer", "migrations")}>
+        <a
+          className="text-link"
+          href={appHref("customer", "migrations", workspaceId)}
+        >
           Review setup <span aria-hidden="true">→</span>
         </a>
       </div>
@@ -1347,7 +1361,9 @@ export function CustomerView({
   workspaceId: string;
   integrations: IntegrationReadiness;
 }) {
-  if (view === "impact") return <ImpactReport data={data} />;
+  if (view === "impact") {
+    return <ImpactReport data={data} workspaceId={workspaceId} />;
+  }
   if (view === "patch") {
     return (
       <PatchReview data={data} review={patchReview} workspaceId={workspaceId} />

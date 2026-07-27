@@ -191,6 +191,12 @@ pre,
   border-radius: 10px;
   background: #fff;
   box-shadow: 0 1px 2px rgba(21, 24, 35, 0.02);
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.workspace-chip:hover {
+  border-color: #d7d5ff;
+  background: #fafaff;
 }
 
 .workspace-avatar,
@@ -2856,6 +2862,92 @@ pre,
   margin-top: 24px;
 }
 
+.workspace-directory {
+  width: min(100%, 760px);
+}
+
+.workspace-list {
+  display: grid;
+  gap: 10px;
+  margin: 24px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workspace-option {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 70px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-subtle);
+  transition: border-color 140ms ease, background-color 140ms ease,
+    transform 140ms ease;
+}
+
+.workspace-option:hover {
+  border-color: #cfcdfd;
+  background: #f8f7ff;
+  transform: translateY(-1px);
+}
+
+.workspace-option-avatar {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--indigo-soft);
+  color: var(--indigo-dark);
+  font-weight: 750;
+}
+
+.workspace-option > span:nth-child(2) {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workspace-option strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-option small {
+  color: var(--muted);
+}
+
+.workspace-option > span:last-child {
+  color: var(--indigo);
+  font-size: 18px;
+}
+
+.workspace-create {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 28px;
+  margin-top: 28px;
+  padding-top: 28px;
+  border-top: 1px solid var(--line);
+}
+
+.workspace-create h2 {
+  margin-bottom: 8px;
+  font-size: 18px;
+}
+
+.workspace-create p {
+  color: var(--muted);
+}
+
+.workspace-create .onboarding-form {
+  margin-top: 0;
+}
+
 .organization-choice {
   display: grid;
   gap: 10px;
@@ -2953,6 +3045,10 @@ pre,
 
   .onboarding-card {
     padding: 24px;
+  }
+
+  .workspace-create {
+    grid-template-columns: 1fr;
   }
 
   .retention-actions {

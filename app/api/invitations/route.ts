@@ -53,7 +53,12 @@ export async function POST(request: Request): Promise<Response> {
     });
     if (html) {
       return Response.redirect(
-        new URL(`/?view=invitations&created=invitation`, request.url),
+        new URL(
+          `/?view=invitations&organization=${encodeURIComponent(
+            context.workspace.organizationId,
+          )}&created=invitation`,
+          request.url,
+        ),
         303,
       );
     }

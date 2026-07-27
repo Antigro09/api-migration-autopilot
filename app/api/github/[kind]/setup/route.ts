@@ -118,7 +118,9 @@ export async function GET(
     });
     return Response.redirect(
       new URL(
-        `/?view=migrations&connected=${encodeURIComponent(kind)}`,
+        `/?view=migrations&organization=${encodeURIComponent(
+          tenant.workspace.organizationId,
+        )}&connected=${encodeURIComponent(kind)}`,
         request.url,
       ),
       303,

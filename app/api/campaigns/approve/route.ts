@@ -25,7 +25,12 @@ export async function POST(request: Request): Promise<Response> {
       expectedContentSha256: String(body.contentSha256 ?? ""),
     });
     return Response.redirect(
-      new URL(`/?view=spec&approved=spec`, request.url),
+      new URL(
+        `/?view=spec&organization=${encodeURIComponent(
+          context.workspace.organizationId,
+        )}&approved=spec`,
+        request.url,
+      ),
       303,
     );
   } catch (error) {

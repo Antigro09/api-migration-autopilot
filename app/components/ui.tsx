@@ -14,9 +14,19 @@ export type AppView =
   | "policies"
   | "runs";
 
-export function appHref(surface: Surface, view: AppView) {
+export function appHref(
+  surface: Surface,
+  view: AppView,
+  organizationId?: string,
+  values: Record<string, string | undefined> = {},
+) {
   void surface;
-  return `/?view=${view}`;
+  const query = new URLSearchParams({ view });
+  if (organizationId) query.set("organization", organizationId);
+  for (const [key, value] of Object.entries(values)) {
+    if (value) query.set(key, value);
+  }
+  return `/?${query.toString()}`;
 }
 
 export function StatusPill({

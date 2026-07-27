@@ -50,7 +50,9 @@ function ProviderOverview({ data }: { data?: ProviderViewData }) {
         title="Migration command center"
         description="Configure an evidence-backed migration campaign, invite customer teams, and track only the lifecycle signals they consent to share."
         actions={
-          <PrimaryLink href={appHref("provider", "campaigns")}>
+          <PrimaryLink
+            href={appHref("provider", "campaigns", data?.workspaceId)}
+          >
             Create first campaign
           </PrimaryLink>
         }
@@ -266,7 +268,11 @@ function ProviderOverview({ data }: { data?: ProviderViewData }) {
         <SectionHeading
           title="Recent activity"
           description="Audit-backed events from campaigns, invitations, and GitHub."
-          action={<a href={appHref("provider", "audit")}>View audit log</a>}
+          action={
+            <a href={appHref("provider", "audit", data?.workspaceId)}>
+              View audit log
+            </a>
+          }
         />
         <EmptyState
           compact
@@ -288,7 +294,7 @@ function Campaigns({ data }: { data?: ProviderViewData }) {
         title="Campaigns"
         description="Each campaign binds one package upgrade to a reviewed, immutable migration specification."
         actions={
-          <PrimaryLink href={appHref("provider", "spec")}>
+          <PrimaryLink href={appHref("provider", "spec", data?.workspaceId)}>
             Configure campaign
           </PrimaryLink>
         }
@@ -307,7 +313,9 @@ function Campaigns({ data }: { data?: ProviderViewData }) {
               title="No campaigns configured"
               description="Create a campaign from provider-owned migration material or begin with the independent Stripe reference blueprint."
               action={
-                <PrimaryLink href={appHref("provider", "spec")}>
+                <PrimaryLink
+                  href={appHref("provider", "spec", data?.workspaceId)}
+                >
                   Open campaign builder
                 </PrimaryLink>
               }
@@ -318,7 +326,12 @@ function Campaigns({ data }: { data?: ProviderViewData }) {
                 <article className="campaign-record" key={campaign.id}>
                   <div>
                     <a
-                      href={`/?view=spec&campaign=${encodeURIComponent(campaign.id)}`}
+                      href={appHref(
+                        "provider",
+                        "spec",
+                        data?.workspaceId,
+                        { campaign: campaign.id },
+                      )}
                     >
                       <strong>{campaign.name}</strong>
                     </a>
@@ -572,7 +585,9 @@ function MigrationSpec({ data }: { data?: ProviderViewData }) {
         title="Migration specification"
         description="Turn provider-authored migration evidence into versioned detectors, transformations, and validation expectations."
         actions={
-          <SecondaryLink href={appHref("provider", "campaigns")}>
+          <SecondaryLink
+            href={appHref("provider", "campaigns", data?.workspaceId)}
+          >
             Back to campaigns
           </SecondaryLink>
         }
@@ -656,7 +671,12 @@ function MigrationSpec({ data }: { data?: ProviderViewData }) {
                       ? "filter-pill filter-pill-active"
                       : "filter-pill"
                   }
-                  href={`/?view=spec&campaign=${encodeURIComponent(candidate.id)}`}
+                  href={appHref(
+                    "provider",
+                    "spec",
+                    data?.workspaceId,
+                    { campaign: candidate.id },
+                  )}
                   key={candidate.id}
                 >
                   {candidate.packageName} → {candidate.targetVersion}

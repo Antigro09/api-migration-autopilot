@@ -120,7 +120,11 @@ function Sidebar({
         </span>
       </div>
 
-      <div className="workspace-chip">
+      <a
+        className="workspace-chip"
+        href="/workspaces"
+        aria-label={`Switch organization. Current organization: ${workspace.name}`}
+      >
         <span className="workspace-avatar" aria-hidden="true">
           {workspace.name.slice(0, 1).toUpperCase()}
         </span>
@@ -131,7 +135,7 @@ function Sidebar({
         <span className="workspace-caret" aria-hidden="true">
           ···
         </span>
-      </div>
+      </a>
 
       <nav className="primary-nav" aria-label={`${surfaceLabels[surface].name} navigation`}>
         <p className="nav-label">Workspace</p>
@@ -140,7 +144,11 @@ function Sidebar({
           return (
             <a
               key={item.view}
-              href={appHref(surface, item.view)}
+              href={appHref(
+                surface,
+                item.view,
+                workspace.organizationId,
+              )}
               className={selected ? "nav-item nav-item-active" : "nav-item"}
               aria-current={selected ? "page" : undefined}
             >
