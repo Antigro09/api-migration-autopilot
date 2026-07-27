@@ -35,7 +35,7 @@ E2B, OpenAI, Resend, or DNS run.
 
 Automated gate at this revision:
 
-- 84 unit/integration/security/accessibility tests
+- 85 unit/integration/security/accessibility tests
 - 6 rendered-production-bundle and payload-budget tests
 - 24-repository assessment evaluation: 100% recall, precision, and status accuracy
 - type checking, lint, and production build pass

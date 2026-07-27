@@ -8,6 +8,8 @@ import abuseControlsSql from "../drizzle/0005_normal_sentry.sql?raw";
 import workflowResultReceiptsSql from "../drizzle/0006_brainy_mac_gargan.sql?raw";
 
 const STATEMENT_BREAKPOINT = "--> statement-breakpoint";
+const ALTER_ADD_COLUMN =
+  /^ALTER TABLE\s+[`"]?([A-Za-z_][A-Za-z0-9_]*)[`"]?\s+ADD\s+[`"]?([A-Za-z_][A-Za-z0-9_]*)[`"]?\s+/i;
 
 /**
  * Applied in order. Each entry is recorded in `_autopilot_schema_versions`
@@ -36,6 +38,20 @@ function idempotentStatement(statement: string): string {
     .replace(/^CREATE INDEX\s+/i, "CREATE INDEX IF NOT EXISTS ");
 }
 
+async function alterColumnAlreadyExists(
+  database: ReturnType<typeof getD1>,
+  statement: string,
+): Promise<boolean> {
+  const match = ALTER_ADD_COLUMN.exec(statement);
+  if (!match) return false;
+  const table = match[1] as string;
+  const column = match[2] as string;
+  const result = await database
+    .prepare(`PRAGMA table_info("${table}")`)
+    .all<{ name: string }>();
+  return result.results.some((entry) => entry.name === column);
+}
+
 async function initialize(): Promise<void> {
   const database = getD1();
   await database
@@ -57,12 +73,19 @@ async function initialize(): Promise<void> {
   for (const migration of MIGRATIONS) {
     if (appliedVersions.has(migration.version)) continue;
 
-    const statements = migration.sql
+    const migrationStatements = migration.sql
       .split(STATEMENT_BREAKPOINT)
       .map((statement) => statement.trim().replace(/;$/, ""))
       .filter(Boolean)
-      .map(idempotentStatement)
-      .map((statement) => database.prepare(statement));
+      .map(idempotentStatement);
+    const statements = [];
+    for (const statement of migrationStatements) {
+      // Sites may apply packaged Drizzle migrations before the Worker starts.
+      // Reconcile that valid state into the runtime ledger rather than
+      // repeatedly failing on SQLite's non-idempotent ADD COLUMN syntax.
+      if (await alterColumnAlreadyExists(database, statement)) continue;
+      statements.push(database.prepare(statement));
+    }
 
     statements.push(
       database
@@ -95,4 +118,12 @@ export function ensureDatabaseSchema(): Promise<void> {
     throw error;
   });
   return initialization;
+}
+
+/** Allows the upgrade-reconciliation path to be exercised in isolated tests. */
+export function resetDatabaseSchemaInitializationForTests(): void {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Schema initialization cannot be reset in production.");
+  }
+  initialization = undefined;
 }
