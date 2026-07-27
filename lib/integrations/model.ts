@@ -51,12 +51,14 @@ export const MODEL_RESIDUAL_PROMPT_VERSION = "model-residual-edits-v1";
 
 export interface ModelGateway {
   classify(input: {
+    organizationId: string;
     candidates: readonly UnresolvedCandidate[];
     evidence: readonly ModelEvidence[];
     allowedPaths: readonly string[];
     consentPolicyVersion: string;
   }): Promise<ModelResult<{ classifications: CandidateClassification[] }>>;
   generateResidualEdits(input: {
+    organizationId: string;
     candidates: readonly UnresolvedCandidate[];
     evidence: readonly ModelEvidence[];
     allowedPaths: readonly string[];
@@ -175,6 +177,8 @@ function assertMinimizedInput(input: {
 
 async function createStructuredResponse<T>(input: {
   model: string;
+  reasoningEffort: "none" | "low" | "medium" | "high" | "xhigh" | "max";
+  safetyIdentifier: string;
   schemaName: string;
   schema: Record<string, unknown>;
   instructions: string;
@@ -191,6 +195,8 @@ async function createStructuredResponse<T>(input: {
       store: false,
       background: false,
       tools: [],
+      reasoning: { effort: input.reasoningEffort },
+      safety_identifier: input.safetyIdentifier,
       max_output_tokens: 12_000,
       input: [
         {
@@ -234,6 +240,30 @@ async function createStructuredResponse<T>(input: {
     inputTokens: Number(payload.usage?.input_tokens ?? 0),
     outputTokens: Number(payload.usage?.output_tokens ?? 0),
   };
+}
+
+async function safetyIdentifier(organizationId: string): Promise<string> {
+  if (!organizationId || organizationId.length > 200) {
+    throw new Error("A bounded organization identifier is required for model safety.");
+  }
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`api-migration-autopilot:${organizationId}`),
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function configuredReasoningEffort(
+  value: string | undefined,
+  fallback: "low" | "medium",
+): "none" | "low" | "medium" | "high" | "xhigh" | "max" {
+  const effort = value?.trim() || fallback;
+  if (!["none", "low", "medium", "high", "xhigh", "max"].includes(effort)) {
+    throw new Error("The configured OpenAI reasoning effort is unsupported.");
+  }
+  return effort as "none" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 const evidenceIdsSchema = {
@@ -410,6 +440,7 @@ function validateResidualEdits(
 
 export class OpenAIModelGateway implements ModelGateway {
   async classify(input: {
+    organizationId: string;
     candidates: readonly UnresolvedCandidate[];
     evidence: readonly ModelEvidence[];
     allowedPaths: readonly string[];
@@ -419,6 +450,11 @@ export class OpenAIModelGateway implements ModelGateway {
     const result = await createStructuredResponse<unknown>({
       model:
         process.env.OPENAI_SPEC_MODEL?.trim() || "gpt-5.6-terra",
+      reasoningEffort: configuredReasoningEffort(
+        process.env.OPENAI_SPEC_REASONING_EFFORT,
+        "low",
+      ),
+      safetyIdentifier: await safetyIdentifier(input.organizationId),
       schemaName: "migration_candidate_classification",
       schema: {
         type: "object",
@@ -472,6 +508,7 @@ export class OpenAIModelGateway implements ModelGateway {
   }
 
   async generateResidualEdits(input: {
+    organizationId: string;
     candidates: readonly UnresolvedCandidate[];
     evidence: readonly ModelEvidence[];
     allowedPaths: readonly string[];
@@ -481,6 +518,11 @@ export class OpenAIModelGateway implements ModelGateway {
     assertMinimizedInput(input);
     const result = await createStructuredResponse<unknown>({
       model: process.env.OPENAI_PATCH_MODEL?.trim() || "gpt-5.6-sol",
+      reasoningEffort: configuredReasoningEffort(
+        process.env.OPENAI_PATCH_REASONING_EFFORT,
+        "medium",
+      ),
+      safetyIdentifier: await safetyIdentifier(input.organizationId),
       schemaName: "migration_residual_edits",
       schema: {
         type: "object",

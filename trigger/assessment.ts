@@ -167,6 +167,7 @@ async function classifyUnresolved(input: {
 
   try {
     const result = await new OpenAIModelGateway().classify({
+      organizationId: input.packet.organizationId,
       candidates,
       evidence,
       allowedPaths: [...new Set(candidates.map((candidate) => candidate.path))],

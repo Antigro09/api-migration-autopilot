@@ -1,6 +1,6 @@
 # Production acceptance audit
 
-Updated for `0.4.0-alpha.1`.
+Updated for `0.4.0-alpha.1` on 2026-07-27.
 
 This document distinguishes shipped code from live-account proof. A local test
 or production build is not represented as a successful GitHub, Trigger.dev,
@@ -35,24 +35,36 @@ E2B, OpenAI, Resend, or DNS run.
 
 Automated gate at this revision:
 
-- 86 unit/integration/security/accessibility tests
+- 88 unit/integration/security/accessibility tests
 - 6 rendered-production-bundle and payload-budget tests
 - 24-repository assessment evaluation: 100% recall, precision, and status accuracy
 - type checking, lint, and production build pass
 - Drizzle schema check passes
 - production dependency audit reports zero advisories
 
+## Live external acceptance completed
+
+- Both GitHub Apps authenticate with their production App IDs and private keys.
+- Trigger.dev production version `20260727.2` deployed three tasks on the
+  stable Node.js 24 runtime with the production callback, E2B, and OpenAI
+  variables present.
+- E2B template `zzlkxj9vamoq5jfanujt` /
+  `d260cbb6-5a59-4c07-9bef-ed697bd67719` ran as a non-root user on Node.js
+  24.18.0. A live deny-all sandbox could not reach the internet; a separate
+  dependency-preparation sandbox reached `registry.npmjs.org` while an
+  unrelated HTTPS destination remained blocked.
+- OpenAI Responses API calls succeeded against `gpt-5.6-terra` and
+  `gpt-5.6-sol` with strict structured outputs, explicit reasoning effort,
+  `store: false`, no hosted tools, and a privacy-preserving safety identifier.
+
 ## Not yet live-accepted
 
-The deployed Sites environment does not contain the external credentials needed
-to prove the complete workflow. The following remain unverified against real
-accounts:
+The following remain unverified against real accounts:
 
 - Scanner and Patcher GitHub App installation and private-repository access
-- Trigger.dev deployment and durable task execution
 - Resend delivery from an owned domain
-- E2B dependency-preparation and offline-validation sandboxes
-- OpenAI residual classification/patching after explicit consent
+- Trigger.dev execution of a complete assessment and patch run
+- OpenAI residual processing inside a customer-consented workflow run
 - real draft PR publication, merge webhook, verification rescan, and deletion
   drill
 

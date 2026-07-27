@@ -63,7 +63,7 @@ export function integrationReadiness(): IntegrationReadiness {
         "E2B_API_KEY",
         "E2B_TEMPLATE_ID",
         "E2B_ASSESSMENT_IMAGE_VERSION",
-        "E2B_REGISTRY_CIDRS",
+        "E2B_REGISTRY_HOSTS",
       ),
       purpose: "Run analysis and validation in isolated, resource-limited sandboxes.",
       requiredFor: "repository assessment and patch validation",

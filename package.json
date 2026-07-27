@@ -16,6 +16,9 @@
     "db:generate": "drizzle-kit generate",
     "eval:assessment": "tsx scripts/evaluate-assessment.ts",
     "audit:production": "node scripts/audit-production-deps.mjs",
+    "e2b:build": "tsx scripts/build-e2b-template.ts",
+    "e2b:verify": "tsx scripts/verify-e2b-template.ts",
+    "openai:verify": "tsx scripts/verify-openai.ts",
     "trigger:dev": "trigger dev --skip-update-check",
     "trigger:deploy": "trigger deploy --skip-update-check"
   },

@@ -114,7 +114,8 @@ for name, _, unsafe_type in entries:
 const INSTALL_COMMANDS = new Set([
   "npm ci --ignore-scripts",
   "pnpm install --frozen-lockfile --ignore-scripts",
-  "yarn install --immutable --ignore-scripts",
+  "yarn install --frozen-lockfile --ignore-scripts",
+  "yarn install --immutable --mode=skip-builds",
 ]);
 
 const SCRIPT_COMMAND =
@@ -217,11 +218,19 @@ async function validateArchiveBeforeExtraction(
   );
 }
 
-function registryCidrs(): string[] {
-  return (process.env.E2B_REGISTRY_CIDRS ?? "")
+function registryHosts(): string[] {
+  const hosts = (process.env.E2B_REGISTRY_HOSTS ?? "")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+  if (
+    hosts.some((host) => host.toLowerCase() !== "registry.npmjs.org")
+  ) {
+    throw new Error(
+      "Registry egress may target only the approved public npm registry host.",
+    );
+  }
+  return hosts;
 }
 
 function infrastructureResult(
@@ -340,8 +349,8 @@ export class E2BSandboxRunner implements SandboxRunner {
     const needsRegistry =
       input.phase === "dependency-preparation" ||
       input.phase === "prepare-and-validate";
-    const cidrs = registryCidrs();
-    if (needsRegistry && cidrs.length === 0) {
+    const hosts = registryHosts();
+    if (needsRegistry && hosts.length === 0) {
       return {
         sandboxId: "not-created",
         phase: input.phase,
@@ -366,8 +375,12 @@ export class E2BSandboxRunner implements SandboxRunner {
       secure: true,
       allowInternetAccess: needsRegistry,
       network: needsRegistry
-        ? { allowOut: cidrs, allowPublicTraffic: false }
-        : { denyOut: ["0.0.0.0/0", "::/0"], allowPublicTraffic: false },
+        ? {
+            allowOut: hosts,
+            denyOut: ["0.0.0.0/0"],
+            allowPublicTraffic: false,
+          }
+        : { denyOut: ["0.0.0.0/0"], allowPublicTraffic: false },
       lifecycle: { onTimeout: "kill" },
       metadata: {
         product: "api-migration-autopilot",
@@ -467,8 +480,8 @@ export class E2BSandboxRunner implements SandboxRunner {
     validateDependencyFiles(input.dependencyFiles);
     if (input.overlayFiles) validateOverlay(input.overlayFiles);
 
-    const cidrs = registryCidrs();
-    if (cidrs.length === 0) {
+    const hosts = registryHosts();
+    if (hosts.length === 0) {
       const commands = [input.installCommand, ...input.validationCommands];
       return {
         sandboxId: "not-created",
@@ -495,7 +508,11 @@ export class E2BSandboxRunner implements SandboxRunner {
       timeoutMs: MAX_RUNTIME_MS,
       secure: true,
       allowInternetAccess: true,
-      network: { allowOut: cidrs, allowPublicTraffic: false },
+      network: {
+        allowOut: hosts,
+        denyOut: ["0.0.0.0/0"],
+        allowPublicTraffic: false,
+      },
       lifecycle: { onTimeout: "kill" },
       metadata: {
         product: "api-migration-autopilot",
@@ -576,7 +593,7 @@ export class E2BSandboxRunner implements SandboxRunner {
       secure: true,
       allowInternetAccess: false,
       network: {
-        denyOut: ["0.0.0.0/0", "::/0"],
+        denyOut: ["0.0.0.0/0"],
         allowPublicTraffic: false,
       },
       lifecycle: { onTimeout: "kill" },

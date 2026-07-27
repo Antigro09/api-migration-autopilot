@@ -107,7 +107,7 @@ function confidenceScore(confidence: MigrationFinding["confidence"]): number {
   return 0.35;
 }
 
-function packageManager(files: readonly RepositoryFile[]): {
+export function packageManager(files: readonly RepositoryFile[]): {
   install: string;
   runner: string;
 } {
@@ -119,8 +119,29 @@ function packageManager(files: readonly RepositoryFile[]): {
     };
   }
   if (paths.has("yarn.lock")) {
+    const manifest = files.find((file) => file.path === "package.json");
+    const lockfile = files.find((file) => file.path === "yarn.lock");
+    let declaredManager = "";
+    if (manifest) {
+      try {
+        const parsed = JSON.parse(manifest.content) as {
+          packageManager?: unknown;
+        };
+        declaredManager =
+          typeof parsed.packageManager === "string"
+            ? parsed.packageManager.toLowerCase()
+            : "";
+      } catch {
+        declaredManager = "";
+      }
+    }
+    const berry =
+      /^yarn@(?:[2-9]|[1-9]\d)(?:\.|$)/.test(declaredManager) ||
+      /^__metadata:\s*$/m.test(lockfile?.content ?? "");
     return {
-      install: "yarn install --immutable --ignore-scripts",
+      install: berry
+        ? "yarn install --immutable --mode=skip-builds"
+        : "yarn install --frozen-lockfile --ignore-scripts",
       runner: "yarn run",
     };
   }
@@ -413,6 +434,7 @@ export const patchRun = task({
         if (candidates.length > 0) {
           try {
             const result = await new OpenAIModelGateway().generateResidualEdits({
+              organizationId: packet.organizationId,
               candidates,
               evidence: buildEvidence(packet),
               allowedPaths: packet.allowedPaths,

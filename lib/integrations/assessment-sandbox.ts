@@ -323,7 +323,7 @@ export class E2BAssessmentSandboxRunner implements AssessmentSandboxRunner {
       secure: true,
       allowInternetAccess: false,
       network: {
-        denyOut: ["0.0.0.0/0", "::/0"],
+        denyOut: ["0.0.0.0/0"],
         allowPublicTraffic: false,
       },
       lifecycle: { onTimeout: "kill" },

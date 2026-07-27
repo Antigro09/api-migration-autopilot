@@ -19,9 +19,11 @@ declare namespace Cloudflare {
     OPENAI_API_KEY?: string;
     OPENAI_SPEC_MODEL?: string;
     OPENAI_PATCH_MODEL?: string;
+    OPENAI_SPEC_REASONING_EFFORT?: string;
+    OPENAI_PATCH_REASONING_EFFORT?: string;
     E2B_API_KEY?: string;
     E2B_TEMPLATE_ID?: string;
-    E2B_REGISTRY_CIDRS?: string;
+    E2B_REGISTRY_HOSTS?: string;
     TRIGGER_SECRET_KEY?: string;
     TRIGGER_API_URL?: string;
     TRIGGER_PROJECT_REF?: string;
