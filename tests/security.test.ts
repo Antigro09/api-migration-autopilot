@@ -5,6 +5,10 @@ import { join, relative } from "node:path";
 import test from "node:test";
 import { parseMigrationAssessment } from "../lib/migration/assessment-validation";
 import { applySecurityHeaders } from "../lib/security/headers";
+import {
+  assertSameOrigin,
+  CrossSiteRequestError,
+} from "../lib/security/requests";
 import { verifyGitHubWebhookSignature } from "../lib/security/webhooks";
 
 test("GitHub webhook verification authenticates the exact raw body", () => {
@@ -80,6 +84,78 @@ test("dynamic responses are private and carry the browser security boundary", ()
   assert.match(headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
   assert.match(headers.get("content-security-policy") ?? "", /worker-src 'self' blob:/);
   assert.doesNotMatch(headers.get("permissions-policy") ?? "", /camera=\*/);
+});
+
+test("same-origin commands accept exact origins and a constrained opaque navigation", () => {
+  assert.doesNotThrow(() =>
+    assertSameOrigin(
+      new Request("https://autopilot.test/api/command", {
+        method: "POST",
+        headers: { origin: "https://autopilot.test" },
+      }),
+    ),
+  );
+
+  assert.doesNotThrow(() =>
+    assertSameOrigin(
+      new Request("https://autopilot.test/api/command", {
+        method: "POST",
+        headers: {
+          origin: "null",
+          "sec-fetch-site": "same-origin",
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-dest": "document",
+          "sec-fetch-user": "?1",
+        },
+      }),
+    ),
+  );
+});
+
+test("opaque command origins fail unless every browser navigation proof is present", () => {
+  const rejectedHeaders: Array<Record<string, string>> = [
+    {},
+    { origin: "https://attacker.example" },
+    {
+      origin: "null",
+      "sec-fetch-site": "cross-site",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-dest": "document",
+      "sec-fetch-user": "?1",
+    },
+    {
+      origin: "null",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-dest": "empty",
+      "sec-fetch-user": "?1",
+    },
+    {
+      origin: "null",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-dest": "iframe",
+      "sec-fetch-user": "?1",
+    },
+    {
+      origin: "null",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-dest": "document",
+    },
+  ];
+  for (const headers of rejectedHeaders) {
+    assert.throws(
+      () =>
+        assertSameOrigin(
+          new Request("https://autopilot.test/api/command", {
+            method: "POST",
+            headers,
+          }),
+        ),
+      CrossSiteRequestError,
+    );
+  }
 });
 
 function routeFiles(root: string): string[] {
