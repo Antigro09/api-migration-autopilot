@@ -148,7 +148,11 @@ export async function readRequestObject(
       if (typeof value !== "string") {
         throw new InvalidRequestError("File uploads require an artifact endpoint.");
       }
-      result[key] = value;
+      // Native HTML forms submit one entry per checked checkbox. Preserve every
+      // selected value as a comma-delimited scalar so domain parsers can apply
+      // their own allowlists without silently dropping all but the last entry.
+      result[key] =
+        result[key] === undefined ? value : `${result[key]},${value}`;
     }
     return result;
   }
