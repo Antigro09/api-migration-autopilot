@@ -13,7 +13,10 @@ import {
 } from "@/lib/domain";
 import { DomainError } from "@/lib/domain/errors";
 import { GitHubAppGateway } from "@/lib/integrations/github";
-import { validatePatchEnvelope } from "@/lib/migration/patch-security";
+import {
+  normalizeRepositoryPath,
+  validatePatchEnvelope,
+} from "@/lib/migration/patch-security";
 import type { PatchRunResult, ValidationCategory } from "@/lib/migration/patch-validation";
 import { VALIDATION_CATEGORIES } from "@/lib/migration/patch-validation";
 import { publicAppUrl } from "@/lib/platform/config";
@@ -298,9 +301,48 @@ async function authorizedPaths(
       repositoryMigrationId,
     )
     .all<{ path: string | null }>();
-  return rows.results
+  const paths = new Set(
+    rows.results
     .map((row) => row.path)
-    .filter((path): path is string => typeof path === "string" && path.length > 0);
+    .filter((path): path is string => typeof path === "string" && path.length > 0),
+  );
+  const migration = await getD1()
+    .prepare(
+      `SELECT assessment_summary AS assessmentSummary
+       FROM repository_migrations
+       WHERE id = ? AND organization_id = ?
+       LIMIT 1`,
+    )
+    .bind(repositoryMigrationId, organizationId)
+    .first<{ assessmentSummary: string | null }>();
+  if (migration?.assessmentSummary) {
+    try {
+      const summary = JSON.parse(migration.assessmentSummary) as {
+        dependency?: {
+          manifestPath?: unknown;
+          lockfilePath?: unknown;
+          supportedSource?: unknown;
+          targetSatisfied?: unknown;
+        };
+      };
+      const dependency = summary.dependency;
+      if (
+        dependency?.supportedSource === true &&
+        dependency.targetSatisfied !== true
+      ) {
+        for (const candidate of [
+          dependency.manifestPath,
+          dependency.lockfilePath,
+        ]) {
+          if (typeof candidate !== "string" || candidate.length === 0) continue;
+          paths.add(normalizeRepositoryPath(candidate));
+        }
+      }
+    } catch {
+      // A malformed summary never widens the write boundary.
+    }
+  }
+  return [...paths].sort();
 }
 
 export async function requestPatch(input: {

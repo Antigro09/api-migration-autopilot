@@ -468,7 +468,7 @@ export class GitHubAppGateway implements GitHubGateway {
 
     const supported = /\.(?:[cm]?[jt]sx?)$/i;
     const metadata =
-      /(?:^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/;
+      /(?:^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock)$/;
     const skipped: Array<{ path: string; reason: string }> = [];
     const candidates = tree.tree.filter((entry) => {
       if (entry.type !== "blob" || entry.mode === "120000") return false;

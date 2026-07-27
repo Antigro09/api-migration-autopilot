@@ -238,6 +238,7 @@ function fakeSandbox(input?: {
   sandboxId?: string;
   failFirstCommand?: boolean;
   preparedArchive?: Uint8Array;
+  fileReads?: Record<string, string>;
 }): CapturedSandbox {
   const commands: string[] = [];
   const writes: string[] = [];
@@ -253,7 +254,13 @@ function fakeSandbox(input?: {
       },
       makeDir: async () => undefined,
       getInfo: async () => ({ size: input?.preparedArchive?.byteLength ?? 128 }),
-      read: async () => input?.preparedArchive ?? new Uint8Array([1, 2, 3]),
+      read: async (
+        path: string,
+        options?: { format?: "text" | "bytes" },
+      ) =>
+        options?.format === "bytes"
+          ? (input?.preparedArchive ?? new Uint8Array([1, 2, 3]))
+          : (input?.fileReads?.[path] ?? ""),
     },
     commands: {
       run: async (command: string) => {
@@ -488,7 +495,12 @@ test("dependency preparation and validation use separate registry-only and offli
       allowPublicTraffic: false,
     });
     assert.equal(options[1]?.allowInternetAccess, false);
-    assert.deepEqual(options[0]?.envs, {});
+    assert.deepEqual(options[0]?.envs, {
+      NPM_CONFIG_REGISTRY: "https://registry.npmjs.org",
+      npm_config_registry: "https://registry.npmjs.org",
+      YARN_NPM_REGISTRY_SERVER: "https://registry.npmjs.org",
+      YARN_REGISTRY: "https://registry.npmjs.org",
+    });
     assert.deepEqual(options[1]?.envs, {});
     assert.equal(sandboxes[0]?.killed.count, 1);
     assert.equal(sandboxes[1]?.killed.count, 1);
@@ -500,4 +512,222 @@ test("dependency preparation and validation use separate registry-only and offli
     if (originalHosts === undefined) delete process.env.E2B_REGISTRY_HOSTS;
     else process.env.E2B_REGISTRY_HOSTS = originalHosts;
   }
+});
+
+test("dependency preparation regenerates an approved lockfile and overlays it for offline validation", async () => {
+  const originalApiKey = process.env.E2B_API_KEY;
+  const originalTemplate = process.env.E2B_TEMPLATE_ID;
+  const originalHosts = process.env.E2B_REGISTRY_HOSTS;
+  process.env.E2B_API_KEY = "test-e2b-key";
+  process.env.E2B_TEMPLATE_ID = "immutable-template-v1";
+  process.env.E2B_REGISTRY_HOSTS = "registry.npmjs.org";
+  const refreshedLockfile =
+    '{"lockfileVersion":3,"packages":{"node_modules/stripe":{"version":"22.1.0"}}}';
+  const sandboxes = [
+    fakeSandbox({
+      sandboxId: "preparation",
+      fileReads: {
+        "/home/user/repository/package-lock.json": refreshedLockfile,
+      },
+    }),
+    fakeSandbox({ sandboxId: "validation" }),
+  ];
+  let created = 0;
+  const creator: SandboxCreator = async () => {
+    const selected = sandboxes[created];
+    created += 1;
+    return (selected as CapturedSandbox).sandbox;
+  };
+  try {
+    const result = await new E2BSandboxRunner(creator).prepareAndValidate({
+      archive: new Uint8Array([1]).buffer,
+      archiveFormat: "zip",
+      dependencyFiles: [
+        {
+          path: "package.json",
+          content: '{"dependencies":{"stripe":"22.1.0"}}',
+        },
+        { path: "package-lock.json", content: '{"lockfileVersion":3}' },
+      ],
+      dependencyLockfileRefresh: {
+        manager: "npm",
+        manifestPath: "package.json",
+        lockfilePath: "package-lock.json",
+      },
+      installCommand: {
+        category: "install",
+        command: "npm ci --ignore-scripts",
+      },
+      validationCommands: [{ category: "test", command: "npm run test" }],
+      overlayFiles: [{ path: "src/index.ts", content: "export {};" }],
+      runId: "run-lockfile-refresh",
+    });
+    assert.deepEqual(result.generatedDependencyFiles, [
+      { path: "package-lock.json", content: refreshedLockfile },
+    ]);
+    assert.ok(
+      sandboxes[0]?.commands.some((command) =>
+        command.includes("npm install --package-lock-only --ignore-scripts"),
+      ),
+    );
+    assert.ok(
+      sandboxes[1]?.writes.includes(
+        "/home/user/repository/package-lock.json",
+      ),
+      "the regenerated lockfile must be overlaid after source extraction",
+    );
+    assert.equal(sandboxes[0]?.killed.count, 1);
+    assert.equal(sandboxes[1]?.killed.count, 1);
+  } finally {
+    if (originalApiKey === undefined) delete process.env.E2B_API_KEY;
+    else process.env.E2B_API_KEY = originalApiKey;
+    if (originalTemplate === undefined) delete process.env.E2B_TEMPLATE_ID;
+    else process.env.E2B_TEMPLATE_ID = originalTemplate;
+    if (originalHosts === undefined) delete process.env.E2B_REGISTRY_HOSTS;
+    else process.env.E2B_REGISTRY_HOSTS = originalHosts;
+  }
+});
+
+test("lockfile refresh supports pnpm workspaces and both Yarn generations with fixed commands", async () => {
+  const originalApiKey = process.env.E2B_API_KEY;
+  const originalTemplate = process.env.E2B_TEMPLATE_ID;
+  const originalHosts = process.env.E2B_REGISTRY_HOSTS;
+  process.env.E2B_API_KEY = "test-e2b-key";
+  process.env.E2B_TEMPLATE_ID = "immutable-template-v1";
+  process.env.E2B_REGISTRY_HOSTS = "registry.npmjs.org";
+  const cases = [
+    {
+      manager: "pnpm" as const,
+      manifestPath: "packages/app/package.json",
+      lockfilePath: "pnpm-lock.yaml",
+      lockfile: "lockfileVersion: '9.0'\n",
+      expectedCommand: "pnpm install --lockfile-only --ignore-scripts",
+      dependencyFiles: [
+        {
+          path: "package.json",
+          content: '{"private":true,"workspaces":["packages/*"]}',
+        },
+        {
+          path: "packages/app/package.json",
+          content: '{"dependencies":{"stripe":"22.1.0"}}',
+        },
+        { path: "pnpm-workspace.yaml", content: "packages:\n  - packages/*\n" },
+      ],
+      installCommand: "pnpm install --frozen-lockfile --ignore-scripts",
+    },
+    {
+      manager: "yarn-classic" as const,
+      manifestPath: "package.json",
+      lockfilePath: "yarn.lock",
+      lockfile: "# yarn lockfile v1\n",
+      expectedCommand: "yarn install --ignore-scripts",
+      dependencyFiles: [
+        {
+          path: "package.json",
+          content:
+            '{"packageManager":"yarn@1.22.22","dependencies":{"stripe":"22.1.0"}}',
+        },
+      ],
+      installCommand: "yarn install --frozen-lockfile --ignore-scripts",
+    },
+    {
+      manager: "yarn-berry" as const,
+      manifestPath: "package.json",
+      lockfilePath: "yarn.lock",
+      lockfile: "__metadata:\n  version: 8\n",
+      expectedCommand: "yarn install --mode=update-lockfile",
+      dependencyFiles: [
+        {
+          path: "package.json",
+          content:
+            '{"packageManager":"yarn@4.9.4","dependencies":{"stripe":"22.1.0"}}',
+        },
+      ],
+      installCommand: "yarn install --immutable --mode=skip-builds",
+    },
+  ];
+  try {
+    for (const fixture of cases) {
+      const refreshed = `${fixture.lockfile}# refreshed\n`;
+      const preparation = fakeSandbox({
+        sandboxId: `${fixture.manager}-preparation`,
+        fileReads: {
+          [`/home/user/repository/${fixture.lockfilePath}`]: refreshed,
+        },
+      });
+      const validation = fakeSandbox({
+        sandboxId: `${fixture.manager}-validation`,
+      });
+      let created = 0;
+      const runner = new E2BSandboxRunner(async () => {
+        const selected = created === 0 ? preparation : validation;
+        created += 1;
+        return selected.sandbox;
+      });
+      const result = await runner.prepareAndValidate({
+        archive: new Uint8Array([1]).buffer,
+        archiveFormat: "zip",
+        dependencyFiles: [
+          ...fixture.dependencyFiles,
+          { path: fixture.lockfilePath, content: fixture.lockfile },
+        ],
+        dependencyLockfileRefresh: {
+          manager: fixture.manager,
+          manifestPath: fixture.manifestPath,
+          lockfilePath: fixture.lockfilePath,
+        },
+        installCommand: {
+          category: "install",
+          command: fixture.installCommand,
+        },
+        validationCommands: [{ category: "test", command: "yarn run test" }],
+        runId: `run-${fixture.manager}`,
+      });
+      assert.equal(
+        result.generatedDependencyFiles?.[0]?.path,
+        fixture.lockfilePath,
+      );
+      assert.ok(
+        preparation.commands.some((command) =>
+          command.includes(fixture.expectedCommand),
+        ),
+      );
+    }
+  } finally {
+    if (originalApiKey === undefined) delete process.env.E2B_API_KEY;
+    else process.env.E2B_API_KEY = originalApiKey;
+    if (originalTemplate === undefined) delete process.env.E2B_TEMPLATE_ID;
+    else process.env.E2B_TEMPLATE_ID = originalTemplate;
+    if (originalHosts === undefined) delete process.env.E2B_REGISTRY_HOSTS;
+    else process.env.E2B_REGISTRY_HOSTS = originalHosts;
+  }
+});
+
+test("lockfile refresh refuses a package-manager and lockfile mismatch", async () => {
+  const runner = new E2BSandboxRunner(async () => fakeSandbox().sandbox);
+  await assert.rejects(
+    runner.prepareAndValidate({
+      archive: new Uint8Array([1]).buffer,
+      archiveFormat: "zip",
+      dependencyFiles: [
+        {
+          path: "package.json",
+          content: '{"dependencies":{"stripe":"22.1.0"}}',
+        },
+        { path: "yarn.lock", content: "# yarn lockfile v1\n" },
+      ],
+      dependencyLockfileRefresh: {
+        manager: "npm",
+        manifestPath: "package.json",
+        lockfilePath: "yarn.lock",
+      },
+      installCommand: {
+        category: "install",
+        command: "npm ci --ignore-scripts",
+      },
+      validationCommands: [],
+      runId: "run-mismatch",
+    }),
+    /does not match the lockfile/,
+  );
 });

@@ -1334,10 +1334,34 @@ test("the work packet advances the migration to generating exactly once", async 
     state: "queued",
     migrationState: "patch_requested",
   });
+  await getD1()
+    .prepare(
+      `UPDATE repository_migrations
+       SET assessment_summary = ?
+       WHERE id = ? AND organization_id = ?`,
+    )
+    .bind(
+      JSON.stringify({
+        dependency: {
+          packageName: "stripe",
+          manifestPath: "package.json",
+          lockfilePath: "package-lock.json",
+          supportedSource: true,
+          targetSatisfied: false,
+        },
+      }),
+      tenant.repositoryMigrationId,
+      tenant.customerOrganizationId,
+    )
+    .run();
 
   const packet = await patchWorkPacket(runId);
   assert.equal(packet?.runId, runId);
-  assert.deepEqual(packet?.allowedPaths, ["src/billing.ts"]);
+  assert.deepEqual(packet?.allowedPaths, [
+    "package-lock.json",
+    "package.json",
+    "src/billing.ts",
+  ]);
   assert.equal(packet?.modelProcessingAllowed, false);
 
   const after = await getD1()

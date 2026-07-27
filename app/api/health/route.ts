@@ -30,7 +30,7 @@ export async function GET(): Promise<Response> {
           ? "ready"
           : "degraded",
       service: "api-migration-autopilot",
-      version: "0.4.0-alpha.1",
+      version: "0.5.0-alpha.1",
       storage: {
         database: Boolean(env.DB),
         artifacts: Boolean(env.ARTIFACTS),

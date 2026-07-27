@@ -39,8 +39,21 @@ export type SandboxRunResult = {
   sandboxId: string;
   phase: SandboxPhase;
   results: SandboxCommandResult[];
+  generatedDependencyFiles?: SandboxOverlayFile[];
   destroyed: boolean;
   destroyedAt?: string;
+};
+
+export type PackageManagerKind =
+  | "npm"
+  | "pnpm"
+  | "yarn-classic"
+  | "yarn-berry";
+
+export type DependencyLockfileRefresh = {
+  manager: PackageManagerKind;
+  manifestPath: string;
+  lockfilePath: string;
 };
 
 export interface SandboxRunner {
@@ -61,6 +74,7 @@ export interface SandboxRunner {
     validationCommands: readonly SandboxCommand[];
     runId: string;
     overlayFiles?: readonly SandboxOverlayFile[];
+    dependencyLockfileRefresh?: DependencyLockfileRefresh;
   }): Promise<SandboxRunResult>;
 }
 
@@ -117,6 +131,20 @@ const INSTALL_COMMANDS = new Set([
   "yarn install --frozen-lockfile --ignore-scripts",
   "yarn install --immutable --mode=skip-builds",
 ]);
+
+const LOCKFILE_REFRESH_COMMANDS: Record<PackageManagerKind, string> = {
+  npm: "npm install --package-lock-only --ignore-scripts",
+  pnpm: "pnpm install --lockfile-only --ignore-scripts",
+  "yarn-classic": "yarn install --ignore-scripts",
+  "yarn-berry": "yarn install --mode=update-lockfile",
+};
+
+const PUBLIC_REGISTRY_ENVS = {
+  NPM_CONFIG_REGISTRY: "https://registry.npmjs.org",
+  npm_config_registry: "https://registry.npmjs.org",
+  YARN_NPM_REGISTRY_SERVER: "https://registry.npmjs.org",
+  YARN_REGISTRY: "https://registry.npmjs.org",
+} as const;
 
 const SCRIPT_COMMAND =
   /^(?:npm run|pnpm run|yarn run|yarn) (?:lint|typecheck|type-check|build|test)(?: -- [A-Za-z0-9_./:=@-]+)*$/;
@@ -204,6 +232,45 @@ function validateDependencyFiles(
   if (total > 10 * 1024 * 1024) {
     throw new Error("Dependency preparation files exceed the 10 MiB limit.");
   }
+}
+
+function validateLockfileRefresh(
+  refresh: DependencyLockfileRefresh,
+  files: readonly SandboxOverlayFile[],
+): {
+  manifestPath: string;
+  lockfilePath: string;
+  command: string;
+} {
+  const manifestPath = normalizeRepositoryPath(refresh.manifestPath);
+  const lockfilePath = normalizeRepositoryPath(refresh.lockfilePath);
+  if (manifestPath.split("/").at(-1)?.toLowerCase() !== "package.json") {
+    throw new Error("Dependency refresh requires a package.json path.");
+  }
+  const lockfileName = lockfilePath.split("/").at(-1)?.toLowerCase();
+  const validLockfile =
+    (refresh.manager === "npm" &&
+      ["package-lock.json", "npm-shrinkwrap.json"].includes(
+        lockfileName ?? "",
+      )) ||
+    (refresh.manager === "pnpm" && lockfileName === "pnpm-lock.yaml") ||
+    (refresh.manager.startsWith("yarn-") && lockfileName === "yarn.lock");
+  if (!validLockfile) {
+    throw new Error("The selected package manager does not match the lockfile.");
+  }
+  const supplied = new Set(
+    files.map((file) => normalizeRepositoryPath(file.path)),
+  );
+  if (!supplied.has(manifestPath) || !supplied.has(lockfilePath)) {
+    throw new Error(
+      "Dependency refresh paths must be present in the minimized dependency files.",
+    );
+  }
+  return {
+    manifestPath,
+    lockfilePath,
+    command: LOCKFILE_REFRESH_COMMANDS[refresh.manager],
+  };
 }
 
 async function validateArchiveBeforeExtraction(
@@ -387,7 +454,7 @@ export class E2BSandboxRunner implements SandboxRunner {
         phase: input.phase,
         runId: input.runId.slice(0, 128),
       },
-      envs: {},
+      envs: needsRegistry ? { ...PUBLIC_REGISTRY_ENVS } : {},
     });
 
     let destroyed = false;
@@ -466,6 +533,7 @@ export class E2BSandboxRunner implements SandboxRunner {
     validationCommands: readonly SandboxCommand[];
     runId: string;
     overlayFiles?: readonly SandboxOverlayFile[];
+    dependencyLockfileRefresh?: DependencyLockfileRefresh;
   }): Promise<SandboxRunResult> {
     if (
       input.archive.byteLength === 0 ||
@@ -479,6 +547,12 @@ export class E2BSandboxRunner implements SandboxRunner {
     }
     validateDependencyFiles(input.dependencyFiles);
     if (input.overlayFiles) validateOverlay(input.overlayFiles);
+    const lockfileRefresh = input.dependencyLockfileRefresh
+      ? validateLockfileRefresh(
+          input.dependencyLockfileRefresh,
+          input.dependencyFiles,
+        )
+      : undefined;
 
     const hosts = registryHosts();
     if (hosts.length === 0) {
@@ -519,11 +593,12 @@ export class E2BSandboxRunner implements SandboxRunner {
         phase: "dependency-preparation",
         runId: input.runId.slice(0, 128),
       },
-      envs: {},
+      envs: { ...PUBLIC_REGISTRY_ENVS },
     });
 
     let preparedArchive: Uint8Array;
     let preparationResult: SandboxCommandResult;
+    let generatedDependencyFiles: SandboxOverlayFile[] | undefined;
     try {
       const preparationRoot = "/home/user/repository";
       await preparation.files.makeDir(preparationRoot);
@@ -533,6 +608,71 @@ export class E2BSandboxRunner implements SandboxRunner {
           data: file.content,
         })),
       );
+      if (lockfileRefresh) {
+        const refreshResult = (
+          await executeSandboxCommands(preparation, preparationRoot, [
+            { category: "install", command: lockfileRefresh.command },
+          ])
+        )[0] as SandboxCommandResult;
+        if (refreshResult.status !== "passed") {
+          const message =
+            "The public lockfile could not be regenerated for the approved target version.";
+          return {
+            sandboxId: preparation.sandboxId,
+            phase: "prepare-and-validate",
+            destroyed: true,
+            destroyedAt: new Date().toISOString(),
+            results: [
+              {
+                category: "install",
+                command: input.installCommand.command,
+                status: "incomplete",
+                durationMs: refreshResult.durationMs,
+                output: refreshResult.output,
+                truncated: refreshResult.truncated,
+                message,
+              },
+              ...input.validationCommands.map((command) => ({
+                category: command.category,
+                command: command.command,
+                status: "incomplete" as const,
+                durationMs: 0,
+                output: "",
+                truncated: false,
+                message:
+                  "Validation was not run because lockfile regeneration was incomplete.",
+              })),
+            ],
+          };
+        }
+        const refreshedLockfile = await preparation.files.read(
+          `${preparationRoot}/${lockfileRefresh.lockfilePath}`,
+          { format: "text", requestTimeoutMs: 120_000 },
+        );
+        if (
+          refreshedLockfile.length === 0 ||
+          new TextEncoder().encode(refreshedLockfile).byteLength >
+            10 * 1024 * 1024
+        ) {
+          throw new Error(
+            "The regenerated lockfile is empty or exceeds the 10 MiB limit.",
+          );
+        }
+        const original = input.dependencyFiles.find(
+          (file) =>
+            normalizeRepositoryPath(file.path) ===
+            lockfileRefresh.lockfilePath,
+        );
+        generatedDependencyFiles =
+          original?.content === refreshedLockfile
+            ? []
+            : [
+                {
+                  path: lockfileRefresh.lockfilePath,
+                  content: refreshedLockfile,
+                },
+              ];
+      }
       preparationResult = (
         await executeSandboxCommands(preparation, preparationRoot, [
           input.installCommand,
@@ -634,7 +774,10 @@ export class E2BSandboxRunner implements SandboxRunner {
         "if find /home/user/repository -xdev \\( -path '/home/user/repository/node_modules' -prune \\) -o \\( -type l -o -type b -o -type c -o -type p -o -type s \\) -print -quit | grep -q .; then exit 86; fi",
         { requestTimeoutMs: 30_000 },
       );
-      for (const file of input.overlayFiles ?? []) {
+      for (const file of [
+        ...(input.overlayFiles ?? []),
+        ...(generatedDependencyFiles ?? []),
+      ]) {
         await validation.files.write(
           `${repositoryRoot}/${normalizeRepositoryPath(file.path)}`,
           file.content,
@@ -649,6 +792,9 @@ export class E2BSandboxRunner implements SandboxRunner {
         sandboxId: validation.sandboxId,
         phase: "prepare-and-validate",
         results: [preparationResult, ...validationResults],
+        ...(generatedDependencyFiles
+          ? { generatedDependencyFiles }
+          : {}),
         destroyed: true,
         destroyedAt: new Date().toISOString(),
       };

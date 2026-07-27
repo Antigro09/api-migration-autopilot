@@ -272,7 +272,7 @@ export async function emitTelemetry(
     ...input,
     salt,
     environment: env.APP_ENV ?? env.NODE_ENV,
-    release: env.APP_RELEASE ?? "0.4.0-alpha.1",
+    release: env.APP_RELEASE ?? "0.5.0-alpha.1",
   });
   const attributes = eventAttributes(event);
   const span = trace

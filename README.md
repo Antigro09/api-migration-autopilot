@@ -174,7 +174,7 @@ setup, failure classification, safe retries, and incident response.
 
 ## Status
 
-Version: `0.4.0-alpha.1`.
+Version: `0.5.0-alpha.1`.
 
 Private hosted control plane:
 [api-migration-autopilot.young-corgi-3741.chatgpt.site](https://api-migration-autopilot.young-corgi-3741.chatgpt.site).

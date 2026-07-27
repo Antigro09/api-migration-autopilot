@@ -10,9 +10,16 @@ import {
 } from "@/lib/integrations/model";
 import {
   E2BSandboxRunner,
+  type PackageManagerKind,
   type SandboxCommand,
   type SandboxCommandResult,
 } from "@/lib/integrations/sandbox";
+import {
+  createDependencyManifestEdit,
+  dependencyManifestTransformerVersion,
+  overlayRepositoryFiles,
+} from "@/lib/migration/dependency-upgrade";
+import { resolvePackageDependency } from "@/lib/migration/dependencies";
 import { assessStripeV20ToV22, stripeAnalyzerVersion } from "@/lib/migration/analyzer";
 import type {
   FileEdit,
@@ -108,12 +115,14 @@ function confidenceScore(confidence: MigrationFinding["confidence"]): number {
 }
 
 export function packageManager(files: readonly RepositoryFile[]): {
+  kind: PackageManagerKind;
   install: string;
   runner: string;
 } {
   const paths = new Set(files.map((file) => file.path));
   if (paths.has("pnpm-lock.yaml")) {
     return {
+      kind: "pnpm",
       install: "pnpm install --frozen-lockfile --ignore-scripts",
       runner: "pnpm run",
     };
@@ -139,13 +148,18 @@ export function packageManager(files: readonly RepositoryFile[]): {
       /^yarn@(?:[2-9]|[1-9]\d)(?:\.|$)/.test(declaredManager) ||
       /^__metadata:\s*$/m.test(lockfile?.content ?? "");
     return {
+      kind: berry ? "yarn-berry" : "yarn-classic",
       install: berry
         ? "yarn install --immutable --mode=skip-builds"
         : "yarn install --frozen-lockfile --ignore-scripts",
       runner: "yarn run",
     };
   }
-  return { install: "npm ci --ignore-scripts", runner: "npm run" };
+  return {
+    kind: "npm",
+    install: "npm ci --ignore-scripts",
+    runner: "npm run",
+  };
 }
 
 function declaredScripts(files: readonly RepositoryFile[]): Set<string> {
@@ -483,7 +497,7 @@ export const patchRun = task({
       }
     }
 
-    const files: FileEdit[] = [];
+    const codeFiles: FileEdit[] = [];
     for (const [path, newContent] of editedByPath) {
       const originalContent = contentByPath.get(path);
       if (originalContent === undefined || originalContent === newContent) continue;
@@ -493,7 +507,7 @@ export const patchRun = task({
       const templateEntry = templates.files.find(
         (entry) => entry.path === path,
       );
-      files.push({
+      codeFiles.push({
         path,
         originalContent,
         newContent,
@@ -509,9 +523,38 @@ export const patchRun = task({
       });
     }
 
-    // Stage 5: integrity, allowed paths, and syntax proof before anything is
-    // sent back to the control plane.
-    const integrity = await validateProposedPatch({
+    const manager = packageManager(source.files);
+    const sandboxConfigured = Boolean(
+      process.env.E2B_API_KEY?.trim() && process.env.E2B_TEMPLATE_ID?.trim(),
+    );
+    let dependencyManifestEdit: FileEdit | undefined;
+    if (
+      sandboxConfigured &&
+      assessment.dependency.supportedSource &&
+      !assessment.dependency.targetSatisfied &&
+      assessment.dependency.manifestPath &&
+      assessment.dependency.lockfilePath &&
+      allowed.has(assessment.dependency.manifestPath) &&
+      allowed.has(assessment.dependency.lockfilePath)
+    ) {
+      try {
+        dependencyManifestEdit = createDependencyManifestEdit({
+          files: source.files,
+          dependency: assessment.dependency,
+          targetVersion: packet.spec.package.targetVersion,
+        });
+      } catch {
+        dependencyManifestEdit = undefined;
+      }
+    }
+    let files: FileEdit[] = [
+      ...codeFiles,
+      ...(dependencyManifestEdit ? [dependencyManifestEdit] : []),
+    ];
+
+    // Prove source-code and manifest edits before any repository content enters
+    // validation. The regenerated lockfile is independently checked below.
+    const preliminaryIntegrity = await validateProposedPatch({
       baseSha: packet.baseSha,
       expectedBaseSha: packet.baseSha,
       files,
@@ -519,10 +562,9 @@ export const patchRun = task({
       currentFiles: contentByPath,
       syntaxValidator: new TypeScriptSyntaxValidator(),
     });
-    const issueCodes = new Set(integrity.issues.map((issue) => issue.code));
-    const patchSha256 = await createPatchHash(packet.baseSha, files);
 
-    // Stages 6-7: dependency preparation and declared validation scripts.
+    // Stages 5-7: lockfile regeneration, dependency preparation, and declared
+    // validation scripts.
     const validation: ValidationOutcomeEntry[] = [];
     const validationLogs: Array<{
       category: ValidationOutcomeEntry["category"];
@@ -530,11 +572,7 @@ export const patchRun = task({
       output: string;
       truncated: boolean;
     }> = [];
-    const manager = packageManager(source.files);
     const scripts = declaredScripts(source.files);
-    const sandboxConfigured = Boolean(
-      process.env.E2B_API_KEY?.trim() && process.env.E2B_TEMPLATE_ID?.trim(),
-    );
     const commands: SandboxCommand[] = [
       { category: "install", command: manager.install },
     ];
@@ -556,16 +594,23 @@ export const patchRun = task({
     let sandboxDestroyedAt: string | undefined;
     let sandboxCleanupComplete = true;
     let sandboxSeconds = 0;
-    if (!sandboxConfigured || files.length === 0) {
+    let dependencyUpgradeComplete = assessment.dependency.targetSatisfied;
+    if (
+      !sandboxConfigured ||
+      files.length === 0 ||
+      !preliminaryIntegrity.valid
+    ) {
       for (const command of commands) {
         validation.push({
           category: command.category,
           command: command.command,
           outcome: "incomplete",
           durationMs: 0,
-          summary: sandboxConfigured
-            ? "The patch produced no file changes, so validation was not started."
-            : "The isolated validation sandbox is not configured, so this command did not run.",
+          summary: !sandboxConfigured
+            ? "The isolated validation sandbox is not configured, so this command did not run."
+            : !preliminaryIntegrity.valid
+              ? "The preliminary patch boundary failed, so repository validation was not started."
+              : "The patch produced no file changes, so validation was not started.",
         });
       }
     } else {
@@ -578,10 +623,16 @@ export const patchRun = task({
           repository: packet.repository,
           ref: packet.baseSha,
         });
+        const dependencyFiles = dependencyPreparationFiles(
+          overlayRepositoryFiles(
+            source.files,
+            dependencyManifestEdit ? [dependencyManifestEdit] : [],
+          ),
+        );
         const sandboxResult = await new E2BSandboxRunner().prepareAndValidate({
           archive,
           archiveFormat: "zip",
-          dependencyFiles: dependencyPreparationFiles(source.files),
+          dependencyFiles,
           installCommand: commands[0] as SandboxCommand,
           validationCommands: commands.slice(1),
           runId: payload.runId,
@@ -589,9 +640,58 @@ export const patchRun = task({
             path: file.path,
             content: file.newContent,
           })),
+          ...(dependencyManifestEdit &&
+          assessment.dependency.manifestPath &&
+          assessment.dependency.lockfilePath
+            ? {
+                dependencyLockfileRefresh: {
+                  manager: manager.kind,
+                  manifestPath: assessment.dependency.manifestPath,
+                  lockfilePath: assessment.dependency.lockfilePath,
+                },
+              }
+            : {}),
         });
         sandboxDestroyedAt = sandboxResult.destroyedAt;
         sandboxCleanupComplete = sandboxResult.destroyed;
+        if (dependencyManifestEdit) {
+          for (const generated of sandboxResult.generatedDependencyFiles ?? []) {
+            if (generated.path !== assessment.dependency.lockfilePath) {
+              throw new Error(
+                "The dependency sandbox returned an unexpected generated path.",
+              );
+            }
+            const original = contentByPath.get(generated.path);
+            if (original === undefined) {
+              throw new Error(
+                "The regenerated lockfile was not present at the approved base SHA.",
+              );
+            }
+            if (generated.content !== original) {
+              files.push({
+                path: generated.path,
+                originalContent: original,
+                newContent: generated.content,
+                ruleIds: ["dependency.lockfile.target"],
+                rationale: [
+                  `Regenerate the public lockfile for ${packet.packageName} ${packet.spec.package.targetVersion} with lifecycle scripts disabled.`,
+                ],
+              });
+            }
+          }
+          const upgraded = resolvePackageDependency({
+            files: overlayRepositoryFiles(source.files, files),
+            packageName: packet.packageName,
+            sourceRange: packet.spec.package.sourceRange,
+            targetVersion: packet.spec.package.targetVersion,
+          });
+          if (!upgraded.targetSatisfied) {
+            throw new Error(
+              "The regenerated dependency metadata did not resolve the approved target version.",
+            );
+          }
+          dependencyUpgradeComplete = true;
+        }
         for (const result of sandboxResult.results) {
           validation.push(mapSandboxResult(result));
           if (result.output.length > 0) {
@@ -604,7 +704,9 @@ export const patchRun = task({
           }
         }
       } catch (error) {
-        sandboxCleanupComplete = false;
+        files = [...codeFiles];
+        dependencyUpgradeComplete = false;
+        if (!sandboxDestroyedAt) sandboxCleanupComplete = false;
         for (const command of commands) {
           validation.push({
             category: command.category,
@@ -621,6 +723,17 @@ export const patchRun = task({
       sandboxSeconds = Math.round((Date.now() - startedAt) / 1_000);
     }
 
+    const integrity = await validateProposedPatch({
+      baseSha: packet.baseSha,
+      expectedBaseSha: packet.baseSha,
+      files,
+      allowedPaths: packet.allowedPaths,
+      currentFiles: contentByPath,
+      syntaxValidator: new TypeScriptSyntaxValidator(),
+    });
+    const issueCodes = new Set(integrity.issues.map((issue) => issue.code));
+    const patchSha256 = await createPatchHash(packet.baseSha, files);
+
     const manifestFindings = scopedFindings.map((finding, index) => ({
       id: safeManifestId("f", index, finding.ruleId),
       ruleId: finding.ruleId,
@@ -635,6 +748,31 @@ export const patchRun = task({
       rationale: finding.message,
       citationArtifactIds: citationArtifactIds(packet, [finding.ruleId]),
     }));
+    if (
+      !assessment.dependency.targetSatisfied &&
+      assessment.dependency.manifestPath
+    ) {
+      manifestFindings.push({
+        id: safeManifestId(
+          "f",
+          manifestFindings.length,
+          "dependency.version.target",
+        ),
+        ruleId: "dependency.version.target",
+        filePath: assessment.dependency.manifestPath,
+        fileSha256: sha256(
+          contentByPath.get(assessment.dependency.manifestPath) ?? "",
+        ),
+        classification: dependencyUpgradeComplete ? "affected" : "uncertain",
+        confidence: dependencyUpgradeComplete ? 1 : 0.65,
+        rationale: dependencyUpgradeComplete
+          ? `${packet.packageName} and its public lockfile were upgraded to ${packet.spec.package.targetVersion}.`
+          : `The approved ${packet.packageName} target version could not be resolved into both the manifest and lockfile.`,
+        citationArtifactIds: packet.spec.sourceArtifacts
+          .slice(0, 10)
+          .map((artifact) => artifact.id),
+      });
+    }
     const manifestEdits = files.map((file, index) => ({
       id: safeManifestId("e", index, file.ruleIds[0] ?? "residual"),
       ruleId: file.ruleIds[0] ?? "stripe.residual",
@@ -695,7 +833,13 @@ export const patchRun = task({
           validationLogs,
           versions: {
             detector: stripeAnalyzerVersion,
-            transformer: `${stripeTransformerVersion}+${parameterizedTemplateTransformerVersion}`,
+            transformer: [
+              stripeTransformerVersion,
+              parameterizedTemplateTransformerVersion,
+              ...(dependencyUpgradeComplete
+                ? [dependencyManifestTransformerVersion]
+                : []),
+            ].join("+"),
             ...(modelVersion ? { model: modelVersion } : {}),
             ...(modelVersion
               ? {
@@ -716,11 +860,11 @@ export const patchRun = task({
               : `syntax-only:${syntaxValidatorVersion}`,
           },
           executionPolicy: {
-            network: "none",
-            allowedHosts: [],
-            cpuCount: 0,
-            memoryMiB: 0,
-            diskMiB: 0,
+            network: sandboxConfigured ? "registry_only" : "none",
+            allowedHosts: sandboxConfigured ? ["registry.npmjs.org"] : [],
+            cpuCount: 2,
+            memoryMiB: 4_096,
+            diskMiB: 10_240,
             maxProcesses: 256,
             maxOutputBytes: MAX_OUTPUT_BYTES,
             timeoutSeconds: VALIDATION_TIMEOUT_SECONDS,

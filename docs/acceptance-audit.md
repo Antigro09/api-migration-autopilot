@@ -1,6 +1,6 @@
 # Production acceptance audit
 
-Updated for `0.4.0-alpha.1` on 2026-07-27.
+Updated for `0.5.0-alpha.1` on 2026-07-27.
 
 This document distinguishes shipped code from live-account proof. A local test
 or production build is not represented as a successful GitHub, Trigger.dev,
@@ -23,6 +23,7 @@ E2B, OpenAI, Resend, or DNS run.
 | Retention | Interrupted-run recovery, atomic deletion claims, storage verification, backoff/dead-letter, export, early erasure |
 | Provider privacy | Provider queries return customer-consented lifecycle aggregates without repository-derived details |
 | Spec-driven assessment | Approved `MigrationSpecV1` detectors drive npm/pnpm/Yarn/workspace resolution and TypeScript/ts-morph symbol-aware findings |
+| Complete dependency patch | JSONC-preserving manifest edits and npm, pnpm, Yarn Classic, or Yarn Berry lockfile regeneration run in the registry-only sandbox before separate offline validation |
 | Offline analyzer boundary | Production task transfers normalized source but no credentials into a deny-all-network E2B analyzer and persists encrypted execution evidence |
 | Workflow callback idempotency | Durable exact-result receipts serialize concurrent delivery, return the original response on replay, and refuse a conflicting result |
 | Internal operations | Allowlisted first-sign-in provisioning, redacted provider/run/deletion/cost health, immutable safe retries, audit-chain verification, and persisted alert lifecycle |
@@ -35,7 +36,7 @@ E2B, OpenAI, Resend, or DNS run.
 
 Automated gate at this revision:
 
-- 88 unit/integration/security/accessibility tests
+- 95 unit/integration/security/accessibility tests
 - 6 rendered-production-bundle and payload-budget tests
 - 24-repository assessment evaluation: 100% recall, precision, and status accuracy
 - type checking, lint, and production build pass
@@ -56,13 +57,17 @@ Automated gate at this revision:
 - OpenAI Responses API calls succeeded against `gpt-5.6-terra` and
   `gpt-5.6-sol` with strict structured outputs, explicit reasoning effort,
   `store: false`, no hosted tools, and a privacy-preserving safety identifier.
+- Resend accepted a production-configured delivery through a sending-only API
+  key using its `resend.dev` test sender and designated delivered-event address.
+  The live app is intentionally limited to Resend test mode until an owned
+  sending domain is available.
 
 ## Not yet live-accepted
 
 The following remain unverified against real accounts:
 
 - Scanner and Patcher GitHub App installation and private-repository access
-- Resend delivery from an owned domain
+- Resend delivery from an owned domain to an external customer
 - Trigger.dev execution of a complete assessment and patch run
 - OpenAI residual processing inside a customer-consented workflow run
 - real draft PR publication, merge webhook, verification rescan, and deletion

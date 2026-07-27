@@ -15,7 +15,11 @@ test("patch validation selects lifecycle-disabled commands for every supported p
         "package-lock.json": "{}",
       }),
     ),
-    { install: "npm ci --ignore-scripts", runner: "npm run" },
+    {
+      kind: "npm",
+      install: "npm ci --ignore-scripts",
+      runner: "npm run",
+    },
   );
   assert.deepEqual(
     packageManager(
@@ -25,6 +29,7 @@ test("patch validation selects lifecycle-disabled commands for every supported p
       }),
     ),
     {
+      kind: "pnpm",
       install: "pnpm install --frozen-lockfile --ignore-scripts",
       runner: "pnpm run",
     },
@@ -37,6 +42,7 @@ test("patch validation selects lifecycle-disabled commands for every supported p
       }),
     ),
     {
+      kind: "yarn-classic",
       install: "yarn install --frozen-lockfile --ignore-scripts",
       runner: "yarn run",
     },
@@ -49,6 +55,7 @@ test("patch validation selects lifecycle-disabled commands for every supported p
       }),
     ),
     {
+      kind: "yarn-berry",
       install: "yarn install --immutable --mode=skip-builds",
       runner: "yarn run",
     },
